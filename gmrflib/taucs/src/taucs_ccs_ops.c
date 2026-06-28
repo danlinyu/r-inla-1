@@ -49,7 +49,7 @@ taucs_ccs_matrix *taucs_ccs_permute_symmetrically(taucs_ccs_matrix * A, int *per
 
 	len = (int *) taucs_malloc(n * sizeof(int));
 	if (!len) {
-		taucs_printf("taucs_ccs_permute_symmetrically: out of memory\n");
+		fprintf(stderr, "taucs_ccs_permute_symmetrically: out of memory\n");
 		taucs_ccs_free(PAPT);
 		return NULL;
 	}
