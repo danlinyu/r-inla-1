@@ -1,11 +1,18 @@
-
 /*********************************************************/
-
 /* TAUCS                                                 */
-
 /* Author: Sivan Toledo                                  */
-
 /*********************************************************/
+
+/*
+ * taucs_ccs_permute_symmetrically
+ *
+ * This routine is part of the upstream TAUCS distribution but was dropped from
+ * the reduced (double-only, non-templated) TAUCS subset bundled under
+ * gmrflib/taucs/.  GMRFLib calls it unconditionally from problem-setup.c, so it
+ * must be present.  Re-implemented here in the subset's plain-double style
+ * (matrix uses int *colptr, int *rowind, double *values; no datatype templating,
+ * no indshift, real symmetric only), matching the declaration in taucs_private.h.
+ */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -17,69 +24,30 @@
 #error "You must define TAUCS_CORE to compile this file"
 #endif
 
-
 #ifdef TAUCS_CORE_GENERAL
+
 taucs_ccs_matrix *taucs_ccs_permute_symmetrically(taucs_ccs_matrix * A, int *perm, int *invperm)
 {
-
-#ifdef TAUCS_DOUBLE_IN_BUILD
-	if (A->flags & TAUCS_DOUBLE)
-		return taucs_dccs_permute_symmetrically(A, perm, invperm);
-#endif
-
-#ifdef TAUCS_SINGLE_IN_BUILD
-	if (A->flags & TAUCS_SINGLE)
-		return taucs_sccs_permute_symmetrically(A, perm, invperm);
-#endif
-
-#ifdef TAUCS_DCOMPLEX_IN_BUILD
-	if (A->flags & TAUCS_DCOMPLEX)
-		return taucs_zccs_permute_symmetrically(A, perm, invperm);
-#endif
-
-#ifdef TAUCS_SCOMPLEX_IN_BUILD
-	if (A->flags & TAUCS_SCOMPLEX)
-		return taucs_cccs_permute_symmetrically(A, perm, invperm);
-#endif
-
-	assert(0);
-	return NULL;
-}
-#endif							       /* TAUCS_CORE_GENERAL */
-
-#ifndef TAUCS_CORE_GENERAL
-
-taucs_ccs_matrix *taucs_dtl(ccs_permute_symmetrically) (taucs_ccs_matrix * A, int *perm, int *invperm) {
 	taucs_ccs_matrix *PAPT;
-	int n;
-	int nnz;
-
-	/*
-	 * int* colptr;
-	 */
+	int n, nnz;
 	int *len;
 	int i, j, ip, I, J;
-	taucs_datatype AIJ;
+	double AIJ;
 
-	assert(A->flags & TAUCS_SYMMETRIC || A->flags & TAUCS_HERMITIAN);
+	(void) perm;					       /* only invperm is used */
+
+	assert(A->flags & TAUCS_SYMMETRIC);
 	assert(A->flags & TAUCS_LOWER);
 
 	n = A->n;
 	nnz = (A->colptr)[n];
 
-	PAPT = taucs_dtl(ccs_create) (n, n, nnz);
+	PAPT = taucs_ccs_create(n, n, nnz, A->flags);
 	if (!PAPT)
 		return NULL;
-
-	/*
-	 * PAPT->flags = TAUCS_SYMMETRIC | TAUCS_LOWER;
-	 */
 	PAPT->flags = A->flags;
 
 	len = (int *) taucs_malloc(n * sizeof(int));
-	/*
-	 * colptr = (int*) taucs_malloc(n * sizeof(int));
-	 */
 	if (!len) {
 		taucs_printf("taucs_ccs_permute_symmetrically: out of memory\n");
 		taucs_ccs_free(PAPT);
@@ -91,23 +59,15 @@ taucs_ccs_matrix *taucs_dtl(ccs_permute_symmetrically) (taucs_ccs_matrix * A, in
 
 	for (j = 0; j < n; j++) {
 		for (ip = (A->colptr)[j]; ip < (A->colptr)[j + 1]; ip++) {
-			/*
-			 * i = (A->rowind)[ip] - (A->indshift);
-			 */
 			i = (A->rowind)[ip];
-
 			I = invperm[i];
 			J = invperm[j];
-
 			if (I < J) {
 				int T = I;
-
 				I = J;
 				J = T;
 			}
-
 			len[J]++;
-
 		}
 	}
 
@@ -120,30 +80,17 @@ taucs_ccs_matrix *taucs_dtl(ccs_permute_symmetrically) (taucs_ccs_matrix * A, in
 
 	for (j = 0; j < n; j++) {
 		for (ip = (A->colptr)[j]; ip < (A->colptr)[j + 1]; ip++) {
-			/*
-			 * i = (A->rowind)[ip] - (A->indshift);
-			 */
 			i = (A->rowind)[ip];
-			AIJ = (A->taucs_values)[ip];
-
+			AIJ = (A->values)[ip];
 			I = invperm[i];
 			J = invperm[j];
-
 			if (I < J) {
 				int T = I;
-
 				I = J;
 				J = T;
-				if (A->flags & TAUCS_HERMITIAN)
-					AIJ = taucs_conj(AIJ);
 			}
-
-			/*
-			 * (PAPT->rowind)[ len[J] ] = I + (PAPT->indshift);
-			 */
 			(PAPT->rowind)[len[J]] = I;
-			(PAPT->taucs_values)[len[J]] = AIJ;
-
+			(PAPT->values)[len[J]] = AIJ;
 			len[J]++;
 		}
 	}
@@ -152,6 +99,4 @@ taucs_ccs_matrix *taucs_dtl(ccs_permute_symmetrically) (taucs_ccs_matrix * A, in
 	return PAPT;
 }
 
-#endif							       /* #ifndef TAUCS_CORE_GENERAL */
-
-/*********************************************************/
+#endif							       /* TAUCS_CORE_GENERAL */
