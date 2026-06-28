@@ -7,12 +7,16 @@
 #include <omp.h>
 #include <unistd.h>
 
-#define CSTACK_DEFNS 1
 #include <R.h>
 #include <Rembedded.h>
 #include <Rinternals.h>
 #include <Rdefines.h>
-#include <Rinterface.h>
+#if !defined(_WIN32)
+#       define CSTACK_DEFNS 1
+#       include <Rinterface.h>
+#else
+extern uintptr_t R_CStackLimit;				       /* Rinterface.h is Unix-only; R.dll still exports this symbol */
+#endif
 
 #include "GMRFLib/timer.h"
 extern char *GMRFLib_tmpdir;
