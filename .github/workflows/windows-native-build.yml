@@ -1,0 +1,91 @@
+name: windows-native-build (phase 0 recon)
+
+# Phase 0 of the native-Windows source build of the `inla` engine.
+# Goal of THIS workflow is reconnaissance, not success:
+#   1. Discover which numeric deps exist in the MSYS2 UCRT64 pacman repo.
+#   2. Attempt to compile GMRFLib (the foundational static lib, no R dependency)
+#      with the modern MinGW toolchain and capture the first wall of errors.
+# inlaprog (which links -lR -lRmath) is deliberately deferred to a later phase.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [windows-native-build]
+
+jobs:
+  recon:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up MSYS2 (UCRT64)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            base-devel
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-gcc-fortran
+            mingw-w64-ucrt-x86_64-make
+            mingw-w64-ucrt-x86_64-pkgconf
+
+      - name: Probe dependency availability in UCRT64 repo
+        run: |
+          echo "## MSYS2 UCRT64 dependency probe" | tee dep-report.txt
+          for p in openblas lapack gsl metis muparser zlib openssl suitesparse amd; do
+            pkg="mingw-w64-ucrt-x86_64-$p"
+            if pacman -Si "$pkg" >/dev/null 2>&1; then
+              ver=$(pacman -Si "$pkg" | awk -F': ' '/^Version/{print $2; exit}')
+              echo "FOUND   $pkg ($ver)" | tee -a dep-report.txt
+            else
+              echo "MISSING $pkg" | tee -a dep-report.txt
+            fi
+          done
+
+      - name: Install available numeric deps (best-effort)
+        run: |
+          pacman -S --noconfirm --needed \
+            mingw-w64-ucrt-x86_64-openblas \
+            mingw-w64-ucrt-x86_64-gsl \
+            mingw-w64-ucrt-x86_64-zlib \
+            mingw-w64-ucrt-x86_64-openssl || true
+          # metis / muparser may not be packaged; do not fail the job if absent
+          pacman -S --noconfirm --needed mingw-w64-ucrt-x86_64-metis    || echo "metis: not in repo"
+          pacman -S --noconfirm --needed mingw-w64-ucrt-x86_64-muparser || echo "muparser: not in repo"
+
+      - name: Toolchain banner
+        run: |
+          echo "uname: $(uname -a)"
+          gcc --version | head -1
+          gfortran --version | head -1
+          make --version | head -1
+
+      - name: Attempt GMRFLib compile (capture first wall of errors)
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          make -C gmrflib \
+            PREFIX="$PWD/local" \
+            LEXTPREFIX=/ucrt64 \
+            CC=gcc CXX=g++ FC=gfortran \
+            FLAGS="-O2 -fopenmp -pthread -DINLA_WITH_OPENBLAS" \
+            2>&1 | tee gmrflib-build.log
+          echo "make exit status: ${PIPESTATUS[0]}"
+
+      - name: Summarise errors
+        if: always()
+        run: |
+          echo "=== first 60 error / undefined / missing-header lines ==="
+          grep -nE 'error:|undefined reference|No such file|fatal error' gmrflib-build.log | head -60 || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: phase0-logs
+          path: |
+            dep-report.txt
+            gmrflib-build.log
