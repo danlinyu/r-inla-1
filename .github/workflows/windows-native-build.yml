@@ -74,6 +74,12 @@ jobs:
           fi
           echo "RBIN=$RBIN" >> "$GITHUB_ENV"
 
+      - name: Generate cgeneric headers (empty tables; bundled external cgeneric pkgs disabled for MVP)
+        run: |
+          cd external-packages
+          bash ./update-cgeneric
+          echo "=== generated headers ===" ; ls -la cgeneric-defs.h cgeneric-table.h ; wc -l cgeneric-defs.h cgeneric-table.h
+
       - name: Attempt inlaprog build (capture first wall of errors)
         continue-on-error: true
         run: |
