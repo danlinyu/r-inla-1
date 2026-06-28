@@ -12,12 +12,7 @@
 #       endif
 
 __BEGIN_DECLS
-#       if !defined(_WIN32)
-/* Windows R ships no standalone libRmath; instead the math functions are
- * exported (Rf_-prefixed) from R.dll, so on Windows we link -lR and let
- * Rmath.h remap the unprefixed names to the Rf_ exports. */
-#              define MATHLIB_STANDALONE
-#       endif
+#       define MATHLIB_STANDALONE
 #       define MATHLIB_FUN(_fun) _fun
 #       if defined(ISNAN)
 #              undef ISNAN
