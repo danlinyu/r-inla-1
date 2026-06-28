@@ -43,6 +43,7 @@ jobs:
             mingw-w64-ucrt-x86_64-zlib
             mingw-w64-ucrt-x86_64-openssl
             mingw-w64-ucrt-x86_64-suitesparse
+            mingw-w64-ucrt-x86_64-libtool
 
       - name: Build + install GMRFLib
         run: |
@@ -85,7 +86,7 @@ jobs:
             RLIB_INC="-DINLA_WITH_LIBR -I$RHOME/include" \
             RLIB_LIB="-L$RBIN -lR" \
             EXTLIBS1="-L$PREFIX/lib -lGMRFLib -ltaucs" \
-            EXTLIBS2="-lgsl -lmetis -lopenblas -lmuparser -lz -lgfortran -lcrypto" \
+            EXTLIBS2="-lgsl -lmetis -lopenblas -lmuparser -lz -lgfortran -lcrypto -lltdl" \
             EXTLIBS3="-lm" \
             2>&1 | tee inlaprog-build.log
           echo "make exit status: ${PIPESTATUS[0]}"
