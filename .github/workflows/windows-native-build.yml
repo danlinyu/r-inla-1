@@ -1,11 +1,9 @@
-name: windows-native-build (phase 0 recon)
+name: windows-native-build (phase 1 inlaprog)
 
-# Phase 0 of the native-Windows source build of the `inla` engine.
-# Goal of THIS workflow is reconnaissance, not success:
-#   1. Discover which numeric deps exist in the MSYS2 UCRT64 pacman repo.
-#   2. Attempt to compile GMRFLib (the foundational static lib, no R dependency)
-#      with the modern MinGW toolchain and capture the first wall of errors.
-# inlaprog (which links -lR -lRmath) is deliberately deferred to a later phase.
+# Phase 1: build + install GMRFLib (proven in phase 0), then attempt to build the
+# `inla` engine (inlaprog), which links GMRFLib + numeric libs + R (libR/libRmath).
+# Goal is still reconnaissance-driven: get inla.exe to link, capturing the first
+# wall of errors (expected around the R linkage and METIS-5 / muParser-2 drift).
 
 on:
   workflow_dispatch:
@@ -13,7 +11,7 @@ on:
     branches: [windows-native-build]
 
 jobs:
-  recon:
+  build:
     runs-on: windows-latest
     defaults:
       run:
@@ -21,71 +19,86 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Set up R (Windows)
+        uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: release
+
       - name: Set up MSYS2 (UCRT64)
         uses: msys2/setup-msys2@v2
         with:
           msystem: UCRT64
           update: true
+          path-type: inherit   # so the msys2 shell can see the Windows R.exe
           install: >-
             base-devel
             mingw-w64-ucrt-x86_64-gcc
             mingw-w64-ucrt-x86_64-gcc-fortran
             mingw-w64-ucrt-x86_64-make
             mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-openblas
+            mingw-w64-ucrt-x86_64-gsl
+            mingw-w64-ucrt-x86_64-metis
+            mingw-w64-ucrt-x86_64-muparser
+            mingw-w64-ucrt-x86_64-zlib
+            mingw-w64-ucrt-x86_64-openssl
+            mingw-w64-ucrt-x86_64-suitesparse
 
-      - name: Probe dependency availability in UCRT64 repo
+      - name: Build + install GMRFLib
         run: |
-          echo "## MSYS2 UCRT64 dependency probe" | tee dep-report.txt
-          for p in openblas lapack gsl metis muparser zlib openssl suitesparse amd; do
-            pkg="mingw-w64-ucrt-x86_64-$p"
-            if pacman -Si "$pkg" >/dev/null 2>&1; then
-              ver=$(pacman -Si "$pkg" | awk -F': ' '/^Version/{print $2; exit}')
-              echo "FOUND   $pkg ($ver)" | tee -a dep-report.txt
-            else
-              echo "MISSING $pkg" | tee -a dep-report.txt
-            fi
-          done
+          set -e
+          PREFIX="$PWD/local"
+          mkdir -p "$PREFIX/lib" "$PREFIX/include" "$PREFIX/bin"
+          make -C gmrflib \
+            PREFIX="$PREFIX" LEXTPREFIX=/ucrt64 \
+            CC=gcc CXX=g++ FC=gfortran \
+            FLAGS="-O2 -fopenmp -pthread -DINLA_WITH_OPENBLAS"
+          make -C gmrflib PREFIX="$PREFIX" LEXTPREFIX=/ucrt64 install
+          # taucs (with AMD) is vendored in gmrflib/taucs; install its static lib for inlaprog
+          cp -v gmrflib/taucs/libtaucs.a "$PREFIX/lib/" || true
+          echo "=== installed libs ===" ; ls -la "$PREFIX/lib"
 
-      - name: Install available numeric deps (best-effort)
+      - name: Locate R and prepare an import library for R.dll
         run: |
-          pacman -S --noconfirm --needed \
-            mingw-w64-ucrt-x86_64-openblas \
-            mingw-w64-ucrt-x86_64-gsl \
-            mingw-w64-ucrt-x86_64-zlib \
-            mingw-w64-ucrt-x86_64-openssl || true
-          # metis / muparser may not be packaged; do not fail the job if absent
-          pacman -S --noconfirm --needed mingw-w64-ucrt-x86_64-metis    || echo "metis: not in repo"
-          pacman -S --noconfirm --needed mingw-w64-ucrt-x86_64-muparser || echo "muparser: not in repo"
+          set -e
+          RHOME="$(cygpath -u "$(Rscript -e 'cat(normalizePath(R.home()))' | tr -d '\r')")"
+          echo "RHOME=$RHOME"
+          echo "RHOME=$RHOME" >> "$GITHUB_ENV"
+          ls "$RHOME/include" | head
+          RBIN="$RHOME/bin/x64"; [ -d "$RBIN" ] || RBIN="$RHOME/bin"
+          echo "RBIN=$RBIN ; contents:" ; ls "$RBIN" | grep -iE '\.(dll|a|lib)$' || true
+          # MinGW needs an import lib for R.dll; generate one if absent.
+          if [ ! -f "$RBIN/libR.dll.a" ]; then
+            ( cd "$RBIN" && gendef R.dll >/dev/null 2>&1 && dlltool -d R.def -l libR.dll.a && echo "generated libR.dll.a" ) || echo "import-lib generation failed (will see link error)"
+          fi
+          echo "RBIN=$RBIN" >> "$GITHUB_ENV"
 
-      - name: Toolchain banner
-        run: |
-          echo "uname: $(uname -a)"
-          gcc --version | head -1
-          gfortran --version | head -1
-          make --version | head -1
-
-      - name: Attempt GMRFLib compile (capture first wall of errors)
+      - name: Attempt inlaprog build (capture first wall of errors)
         continue-on-error: true
         run: |
           set -o pipefail
-          make -C gmrflib \
-            PREFIX="$PWD/local" \
-            LEXTPREFIX=/ucrt64 \
+          PREFIX="$PWD/local"
+          make -C inlaprog \
+            PREFIX="$PREFIX" LEXTPREFIX=/ucrt64 \
             CC=gcc CXX=g++ FC=gfortran \
-            FLAGS="-O2 -fopenmp -pthread -DINLA_WITH_OPENBLAS" \
-            2>&1 | tee gmrflib-build.log
+            FLAGS="-std=gnu99 -O2 -fopenmp -pipe -DINLA_WITH_OPENBLAS" \
+            RLIB_INC="-DINLA_WITH_LIBR -I$RHOME/include" \
+            RLIB_LIB="-L$RBIN -lR" \
+            EXTLIBS1="-L$PREFIX/lib -lGMRFLib -ltaucs" \
+            EXTLIBS2="-lgsl -lmetis -lopenblas -lmuparser -lz -lgfortran -lcrypto" \
+            EXTLIBS3="-lm" \
+            2>&1 | tee inlaprog-build.log
           echo "make exit status: ${PIPESTATUS[0]}"
+          echo "=== does inla.exe exist? ===" ; ls -la inlaprog/inla* 2>&1 || true
 
       - name: Summarise errors
         if: always()
         run: |
-          echo "=== first 60 error / undefined / missing-header lines ==="
-          grep -nE 'error:|undefined reference|No such file|fatal error' gmrflib-build.log | head -60 || true
+          echo "=== compile errors ===" ; grep -nE 'error:|fatal error|No such file' inlaprog-build.log | head -40 || true
+          echo "=== link errors (undefined refs) ===" ; grep -nE 'undefined reference|cannot find -l|undefined symbol' inlaprog-build.log | head -40 || true
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: phase0-logs
-          path: |
-            dep-report.txt
-            gmrflib-build.log
+          name: phase1-logs
+          path: inlaprog-build.log
