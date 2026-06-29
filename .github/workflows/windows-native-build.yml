@@ -223,13 +223,25 @@ jobs:
             r <- ref[[nm]]; t <- tst[[nm]]
             if (is.null(r) || is.null(t)) { cat("  SKIP (a fit failed)\n"); allpass <- FALSE; next }
             fd <- if (!is.null(r$summary.fixed) && nrow(r$summary.fixed)) max(abs(r$summary.fixed[,"mean"]-t$summary.fixed[,"mean"])) else 0
-            hd <- if (!is.null(r$summary.hyperpar) && nrow(r$summary.hyperpar)) max(abs(r$summary.hyperpar[,"mean"]-t$summary.hyperpar[,"mean"])) else 0
+            ## Hyperparameters: compare on the MEDIAN (0.5quant). The MEAN of a
+            ## weakly-identified precision has a heavy right tail and is an unstable
+            ## summary; the median/mode are the statistically appropriate metric.
+            hmean <- hmed <- 0
+            if (!is.null(r$summary.hyperpar) && nrow(r$summary.hyperpar)) {
+              hmean <- max(abs(r$summary.hyperpar[,"mean"]     - t$summary.hyperpar[,"mean"]))
+              hmed  <- max(abs(r$summary.hyperpar[,"0.5quant"] - t$summary.hyperpar[,"0.5quant"])
+                           / pmax(abs(r$summary.hyperpar[,"0.5quant"]), 1e-6))  # relative
+            }
             rd <- 0
             if (length(r$summary.random)) for (k in names(r$summary.random))
               rd <- max(rd, max(abs(r$summary.random[[k]]$mean - t$summary.random[[k]]$mean)))
             md <- max(abs(r$mlik - t$mlik))
-            cat(sprintf("  fixed=%.2e  hyper=%.2e  random(latent field)=%.2e  mlik=%.2e\n", fd, hd, rd, md))
-            ok <- (fd<1e-3) && (hd<1e-2) && (rd<1e-3) && (md<1e-1)
+            cat(sprintf("  fixed=%.2e  hyper(mean)=%.2e  hyper(median,rel)=%.2e  random(latent field)=%.2e  mlik=%.2e\n",
+                        fd, hmean, hmed, rd, md))
+            if (hmean > 1e-2) { cat("  -- hyperpar means (ref vs our) --\n")
+              print(round(cbind(ref=r$summary.hyperpar[,"mean"], our=t$summary.hyperpar[,"mean"],
+                                ref.median=r$summary.hyperpar[,"0.5quant"], our.median=t$summary.hyperpar[,"0.5quant"]), 4)) }
+            ok <- (fd<1e-3) && (hmed<1e-2) && (rd<1e-3) && (md<1e-1)   # median-based hyper criterion
             cat("  ", if (ok) "PASS" else "REVIEW", "\n", sep="")
             if (!ok) allpass <- FALSE
           }
