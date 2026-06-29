@@ -336,6 +336,22 @@ int METIS51PARDISO_NodeND(int *nvtxs, int *xadj, int *adjncy, int *vwgt, int *op
 	return METIS_NodeND(nvtxs, xadj, adjncy, vwgt, options, perm, iperm);
 }
 
+/* Panua matrix/vector check + stats helpers GMRFLib references under its debug/check
+ * paths. oneMKL has no equivalents; provide no-ops (GMRFLib calls them only when its
+ * own csr_check / verbose flags are set, which are off by default). */
+void pardiso_chkmatrix(int *a, int *b, double *c, int *d, int *e, int *f)
+{
+	(void) a; (void) b; (void) c; (void) d; (void) e; (void) f;
+}
+void pardiso_chkvec(int *a, int *b, double *c, int *d)
+{
+	(void) a; (void) b; (void) c; (void) d;
+}
+void pardiso_printstats(int *a, int *b, double *c, int *d, int *e, int *f, double *g, int *h)
+{
+	(void) a; (void) b; (void) c; (void) d; (void) e; (void) f; (void) g; (void) h;
+}
+
 /* Debug-only residual helper (GMRFLib calls it only under a hard-coded debug=0). */
 void pardiso_residual(int *mtype, int *n, double *a, int *ia, int *ja, double *b, double *x, double *y, double *norm_b, double *norm_res)
 {
