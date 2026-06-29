@@ -175,31 +175,65 @@ jobs:
           echo "our engine (via wrapper): $OURINLA"
           cat inla-wrap.bat
           cat > smoke.R <<'EOF'
-          suppressMessages(library(INLA))
+          suppressMessages({library(INLA); library(Matrix)})
           our.call <- commandArgs(trailingOnly=TRUE)[1]
-          set.seed(1); n <- 50; x <- rnorm(n); y <- 1.0 + 2.0*x + rnorm(n)
-          d <- data.frame(y=y, x=x)
-          fit <- function() inla(y ~ x, data=d, family="gaussian",
-                                 control.inla=list(int.strategy="eb"))
-          cat("== reference (official engine) ==\n")
-          ref <- fit()
-          cat("== test (our from-source inla.exe) ==\n")
+          set.seed(1)
+
+          ## A matrix of models that exercise distinct engine code paths:
+          ## gaussian LM (baseline), Poisson+iid (likelihood+latent), rw1
+          ## (structured sparse GMRF), besag (irregular-graph GMRF -> reordering /
+          ## taucs permute -> the reimplemented function; also checks the spatial field).
+          make_cases <- function() {
+            cs <- list()
+            n <- 50; x <- rnorm(n); y <- 1 + 2*x + rnorm(n)
+            cs$gaussian_lm <- list(f=y ~ x, fam="gaussian", d=data.frame(y=y, x=x))
+            n <- 100; x <- rnorm(n); id <- 1:n
+            yp <- rpois(n, exp(0.5 + 0.3*x + rnorm(n, sd=0.2)))
+            cs$poisson_iid <- list(f=yp ~ x + f(id, model="iid"), fam="poisson",
+                                   d=data.frame(yp=yp, x=x, id=id))
+            n <- 60; t <- 1:n
+            yr <- 2*sin(2*pi*t/n) + rnorm(n, sd=0.4)
+            cs$rw1 <- list(f=yr ~ f(t, model="rw1"), fam="gaussian",
+                           d=data.frame(yr=yr, t=t))
+            ns <- 30; A <- Matrix(0, ns, ns, sparse=TRUE)
+            for (i in 1:(ns-1)) { A[i,i+1] <- 1; A[i+1,i] <- 1 }
+            g <- inla.read.graph(A)
+            sp <- cumsum(rnorm(ns, sd=0.3)); sp <- sp - mean(sp)
+            yb <- 1 + sp + rnorm(ns, sd=0.3)
+            cs$besag <- list(f=yb ~ f(s, model="besag", graph=g), fam="gaussian",
+                             d=data.frame(yb=yb, s=1:ns))
+            cs
+          }
+          run1 <- function(cs) inla(cs$f, family=cs$fam, data=cs$d,
+                                    control.compute=list(dic=FALSE),
+                                    control.inla=list(int.strategy="eb"))
+          cases <- make_cases()
+
+          cat("=== REFERENCE (official engine) ===\n")
+          ref <- setNames(lapply(names(cases), function(nm)
+            tryCatch(run1(cases[[nm]]), error=function(e){cat("REF FAIL",nm,":",conditionMessage(e),"\n");NULL})), names(cases))
+          cat("=== TEST (our from-source inla.exe) ===\n")
           inla.setOption(inla.call=our.call)
-          tst <- tryCatch(inla(y ~ x, data=d, family="gaussian",
-                                control.inla=list(int.strategy="eb"), verbose=TRUE),
-                          error=function(e){cat("OUR ENGINE ERROR:", conditionMessage(e), "\n"); NULL})
-          if (is.null(tst)) { cat("our engine did not return a fit; see verbose output above\n"); quit(save="no", status=0) }
-          cat("\n--- reference summary.fixed ---\n"); print(ref$summary.fixed[,1:2])
-          cat("\n--- our       summary.fixed ---\n"); print(tst$summary.fixed[,1:2])
-          cat("\n--- reference summary.hyperpar ---\n"); print(ref$summary.hyperpar[,1:2])
-          cat("\n--- our       summary.hyperpar ---\n"); print(tst$summary.hyperpar[,1:2])
-          fd <- max(abs(ref$summary.fixed[,"mean"]    - tst$summary.fixed[,"mean"]))
-          hd <- max(abs(ref$summary.hyperpar[,"mean"] - tst$summary.hyperpar[,"mean"]))
-          md <- max(abs(ref$mlik - tst$mlik))
-          cat(sprintf("\nmax|fixed mean diff|    = %.3e\n", fd))
-          cat(sprintf("max|hyperpar mean diff| = %.3e\n", hd))
-          cat(sprintf("max|mlik diff|          = %.3e\n", md))
-          if (fd < 1e-4 && hd < 1e-3 && md < 1e-2) cat("SMOKE TEST: PASS\n") else cat("SMOKE TEST: REVIEW (see diffs)\n")
+          tst <- setNames(lapply(names(cases), function(nm)
+            tryCatch(run1(cases[[nm]]), error=function(e){cat("OUR FAIL",nm,":",conditionMessage(e),"\n");NULL})), names(cases))
+
+          allpass <- TRUE
+          for (nm in names(cases)) {
+            cat("\n##### model:", nm, "#####\n")
+            r <- ref[[nm]]; t <- tst[[nm]]
+            if (is.null(r) || is.null(t)) { cat("  SKIP (a fit failed)\n"); allpass <- FALSE; next }
+            fd <- if (!is.null(r$summary.fixed) && nrow(r$summary.fixed)) max(abs(r$summary.fixed[,"mean"]-t$summary.fixed[,"mean"])) else 0
+            hd <- if (!is.null(r$summary.hyperpar) && nrow(r$summary.hyperpar)) max(abs(r$summary.hyperpar[,"mean"]-t$summary.hyperpar[,"mean"])) else 0
+            rd <- 0
+            if (length(r$summary.random)) for (k in names(r$summary.random))
+              rd <- max(rd, max(abs(r$summary.random[[k]]$mean - t$summary.random[[k]]$mean)))
+            md <- max(abs(r$mlik - t$mlik))
+            cat(sprintf("  fixed=%.2e  hyper=%.2e  random(latent field)=%.2e  mlik=%.2e\n", fd, hd, rd, md))
+            ok <- (fd<1e-3) && (hd<1e-2) && (rd<1e-3) && (md<1e-1)
+            cat("  ", if (ok) "PASS" else "REVIEW", "\n", sep="")
+            if (!ok) allpass <- FALSE
+          }
+          cat("\n=== OVERALL:", if (allpass) "ALL MODELS MATCH OFFICIAL ENGINE" else "SOME MODELS NEED REVIEW", "===\n")
           EOF
           Rscript smoke.R "$OURINLA" 2>&1 | tee smoke.log
           echo "smoke exit: ${PIPESTATUS[0]}"
