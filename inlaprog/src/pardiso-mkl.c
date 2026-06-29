@@ -291,32 +291,51 @@ void pardiso(void *pt, int *maxfct, int *mnum, int *mtype, int *phase, int *n,
 		iparm[21] = my_iparm[21];		       /* # positive pivots */
 		iparm[22] = my_iparm[22];		       /* # negative pivots (pos-def check) */
 
-		/* log-determinant via the LDL^T pivots; also cache D for the L/L^T solves */
 		if (*error == 0) {
+			int nn = *n;
 			pmkl_scratch_tp *s = pmkl_scratch_get(pt, 1);
-			double *D = (double *) malloc((size_t) (*n) * sizeof(double));
-			double *da = (double *) malloc((size_t) (*n) * sizeof(double));
+
+			/* log-determinant via the LDL^T pivots (getdiag), written into dparm[32] */
+			double *D = (double *) malloc((size_t) nn * sizeof(double));
+			double *da = (double *) malloc((size_t) nn * sizeof(double));
 			int gerr = 0;
 			mkl_pardiso_getdiag_p((const void *) pt, D, da, mnum, &gerr);
 			if (gerr == 0) {
 				double logdet = 0.0;
-				for (int i = 0; i < *n; i++) {
+				for (int i = 0; i < nn; i++) {
 					logdet += log(fabs(D[i]));
 				}
 				if (dparm) {
-					dparm[32] = logdet;	       /* GMRFLib reads log_det_Q = dparm[32] */
-				}
-				if (s) {
-					free(s->D);
-					s->D = D;
-					s->n = *n;
-					D = NULL;
+					dparm[32] = logdet;
 				}
 			} else {
 				fprintf(stderr, "\t*** pardiso-mkl: pardiso_getdiag failed (err=%d)\n", gerr);
 			}
 			free(D);
 			free(da);
+
+			/* Cache sc = 1/sqrt(pivot) in oneMKL's INTERNAL solve ordering, obtained
+			 * directly from phase 332 (the diagonal solve) on a ones-vector:
+			 * 332(ones)[i] = 1/D_i in exactly the domain phases 331/333 operate in.
+			 * This makes the L/L^T square-root solves correct regardless of oneMKL's
+			 * internal fill-reducing permutation (getdiag's ordering is ambiguous). */
+			double *ones = (double *) malloc((size_t) nn * sizeof(double));
+			double *v = (double *) malloc((size_t) nn * sizeof(double));
+			for (int i = 0; i < nn; i++) {
+				ones[i] = 1.0;
+			}
+			int ph332 = 332, ferr = 0, one = 1;
+			mkl_pardiso_p(pt, maxfct, mnum, mtype, &ph332, n, a, ia, ja, &idum, &one, my_iparm, msglvl, ones, v, &ferr);
+			if (ferr == 0 && s) {
+				free(s->D);
+				s->D = (double *) malloc((size_t) nn * sizeof(double));
+				for (int i = 0; i < nn; i++) {
+					s->D[i] = sqrt(fabs(v[i]));	/* = 1/sqrt(D_i) */
+				}
+				s->n = nn;
+			}
+			free(ones);
+			free(v);
 		}
 		return;
 	}
@@ -345,27 +364,27 @@ void pardiso(void *pt, int *maxfct, int *mnum, int *mtype, int *phase, int *n,
 		}
 
 		pmkl_scratch_tp *s = pmkl_scratch_get(pt, 0);
-		int have_D = (s && s->D && s->n == nn);
+		int have_sc = (s && s->D && s->n == nn);	       /* s->D holds sc = 1/sqrt(D_i) */
 
 		if (mode == 1 || mode == -12) {
-			/* x = D^{-1/2} (L^{-1} P b): forward solve, then scale */
+			/* x = sc .* (L^{-1} P b): forward solve (331), then scale */
 			int ph = 331;
 			mkl_pardiso_p(pt, maxfct, mnum, mtype, &ph, n, a, ia, ja, &idum, nrhs, my_iparm, msglvl, b, x, error);
-			if (have_D) {
+			if (have_sc) {
 				for (int j = 0; j < nr; j++) {
 					double *xx = x + j * nn;
 					for (int i = 0; i < nn; i++) {
-						xx[i] /= sqrt(fabs(s->D[i]));
+						xx[i] *= s->D[i];
 					}
 				}
 			}
 		} else {
-			/* x = P^T L^{-T} (D^{-1/2} b): scale b, then backward solve */
+			/* x = P^T L^{-T} (sc .* b): scale b, then backward solve (333) */
 			double *bb = (double *) malloc((size_t) nn * nr * sizeof(double));
 			for (int j = 0; j < nr; j++) {
 				double *src = b + j * nn, *dst = bb + j * nn;
 				for (int i = 0; i < nn; i++) {
-					dst[i] = have_D ? (src[i] / sqrt(fabs(s->D[i]))) : src[i];
+					dst[i] = have_sc ? (src[i] * s->D[i]) : src[i];
 				}
 			}
 			int ph = 333;
