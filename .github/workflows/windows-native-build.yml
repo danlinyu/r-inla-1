@@ -175,7 +175,7 @@ jobs:
           echo "our engine (via wrapper): $OURINLA"
           cat inla-wrap.bat
           cat > smoke.R <<'EOF'
-          suppressMessages({library(INLA); library(Matrix)})
+          suppressMessages({library(INLA); library(Matrix); library(fmesher)})
           our.call <- commandArgs(trailingOnly=TRUE)[1]
           set.seed(1)
 
