@@ -79,12 +79,9 @@ static void pmkl_load(void)
 				fprintf(stderr, "\n\t*** pardiso-mkl: cannot load mkl_rt runtime. Exit.\n\n");
 				exit(1);
 			}
-			fprintf(stderr, "PMKL: mkl_rt loaded h=%p\n", h);
 			mkl_pardisoinit_p = (mkl_pardisoinit_fn) pmkl_sym(h, "pardisoinit");
 			mkl_pardiso_p = (mkl_pardiso_fn) pmkl_sym(h, "pardiso");
 			mkl_pardiso_getdiag_p = (mkl_pardiso_getdiag_fn) pmkl_sym(h, "pardiso_getdiag");
-			fprintf(stderr, "PMKL: syms init=%p pardiso=%p getdiag=%p\n",
-				(void*)mkl_pardisoinit_p, (void*)mkl_pardiso_p, (void*)mkl_pardiso_getdiag_p);
 			if (!mkl_pardisoinit_p || !mkl_pardiso_p || !mkl_pardiso_getdiag_p) {
 				fprintf(stderr, "\n\t*** pardiso-mkl: mkl_rt missing pardiso entry points. Exit.\n\n");
 				exit(1);
@@ -169,13 +166,10 @@ void pardisoinit(void *pt, int *mtype, int *solver, int *iparm, double *dparm, i
 {
 	(void) solver;
 	(void) dparm;
-	fprintf(stderr, "PMKL: pardisoinit entry mtype=%d\n", *mtype);
 	pmkl_load();
-	fprintf(stderr, "PMKL: pardisoinit -> setup_iparm\n");
 	int mt = 2;					       /* SPD; see note in pardiso() */
 	(void) mtype;
 	pmkl_setup_iparm(iparm, mt);
-	fprintf(stderr, "PMKL: pardisoinit setup_iparm done\n");
 	for (int i = 0; i < 64; i++) {
 		((void **) pt)[i] = NULL;
 	}
@@ -189,7 +183,6 @@ void pardiso(void *pt, int *maxfct, int *mnum, int *mtype, int *phase, int *n,
 	pmkl_load();
 
 	int caller_phase = *phase;
-	fprintf(stderr, "PMKL: pardiso enter phase=%d n=%d nrhs=%d\n", caller_phase, *n, *nrhs);
 	int idum = 0;
 	double ddum = 0.0;
 	int safe_nrhs = 1;				       /* GMRFLib passes nrhs=-1 for analysis; oneMKL wants >=1 */
@@ -213,30 +206,80 @@ void pardiso(void *pt, int *maxfct, int *mnum, int *mtype, int *phase, int *n,
 	}
 
 	if (caller_phase == -22) {
-		/* selected inverse (Q^{-1} on a sparsity pattern). oneMKL's selected
-		 * inversion is requested with phase = -22 after a phase-22 factorize.
-		 * The validation harness reports exactly what oneMKL fills in. */
-		int ph = -22;
-		mkl_pardiso_p(pt, maxfct, mnum, mtype, &ph, n, a, ia, ja, perm, &safe_nrhs, my_iparm, msglvl, &ddum, &ddum, error);
-		/* GMRFLib reads back the inverse from `a` (the CSR values array) */
-		iparm[17] = my_iparm[17];
+		/* Selected inverse: fill a[] (on the upper-triangular (ia,ja) pattern) with
+		 * the corresponding elements of Q^{-1}. oneMKL's own phase=-22 selected
+		 * inversion is not used here (it is not a clean drop-in for the Panua pattern
+		 * convention); instead we compute the needed elements with full solves
+		 * Q X = I, which reuse the validated full solve and are exact. This is correct
+		 * but O(n) solves; a Takahashi recursion is the future performance optimization. */
+		int nn = *n;
+		int base = ia[0];			       /* 1-based in this build */
+		int nnz = ia[nn] - base;
+
+		/* transpose the upper CSR pattern into per-column lists (0-based column j) */
+		int *colptr = (int *) calloc((size_t) (nn + 1), sizeof(int));
+		int *colk = (int *) malloc((size_t) nnz * sizeof(int));	/* position in a[] */
+		int *colrow = (int *) malloc((size_t) nnz * sizeof(int));	/* row i */
+		int *fill = (int *) calloc((size_t) nn, sizeof(int));
+		for (int k = 0; k < nnz; k++) {
+			colptr[(ja[k] - base) + 1]++;
+		}
+		for (int j = 0; j < nn; j++) {
+			colptr[j + 1] += colptr[j];
+		}
+		for (int i = 0; i < nn; i++) {
+			for (int k = ia[i] - base; k < ia[i + 1] - base; k++) {
+				int j = ja[k] - base;
+				int p = colptr[j] + fill[j]++;
+				colk[p] = k;
+				colrow[p] = i;
+			}
+		}
+
+		/* keep the matrix values for the solves; a[] will be overwritten with Q^{-1} */
+		double *acopy = (double *) malloc((size_t) nnz * sizeof(double));
+		memcpy(acopy, a, (size_t) nnz * sizeof(double));
+
+		int BS = 64;
+		if (BS > nn) {
+			BS = nn;
+		}
+		double *rhs = (double *) malloc((size_t) nn * BS * sizeof(double));
+		double *sol = (double *) malloc((size_t) nn * BS * sizeof(double));
+		int ph33 = 33, err = 0;
+		for (int j0 = 0; j0 < nn; j0 += BS) {
+			int nb = (j0 + BS <= nn) ? BS : (nn - j0);
+			for (int t = 0; t < nn * nb; t++) {
+				rhs[t] = 0.0;
+			}
+			for (int c = 0; c < nb; c++) {
+				rhs[(size_t) c * nn + (j0 + c)] = 1.0;	/* e_{j0+c} */
+			}
+			mkl_pardiso_p(pt, maxfct, mnum, mtype, &ph33, n, acopy, ia, ja, &idum, &nb, my_iparm, msglvl, rhs, sol, &err);
+			if (err) {
+				*error = err;
+			}
+			for (int c = 0; c < nb; c++) {
+				int j = j0 + c;
+				double *xc = sol + (size_t) c * nn;
+				for (int p = colptr[j]; p < colptr[j + 1]; p++) {
+					a[colk[p]] = xc[colrow[p]];
+				}
+			}
+		}
+		free(colptr);
+		free(colk);
+		free(colrow);
+		free(fill);
+		free(acopy);
+		free(rhs);
+		free(sol);
 		return;
 	}
 
 	if (caller_phase == 11) {
 		int ph = 11;
-		if (*n <= 20) {
-			int nnz = ia[*n] - ia[0];
-			fprintf(stderr, "PMKL: csr n=%d nnz=%d iparm[34]=%d ia[0]=%d ia[n]=%d\n",
-				*n, nnz, my_iparm[34], ia[0], ia[*n]);
-			fprintf(stderr, "PMKL: ia=");
-			for (int i = 0; i <= *n; i++) fprintf(stderr, "%d ", ia[i]);
-			fprintf(stderr, "\nPMKL: ja=");
-			for (int i = 0; i < nnz; i++) fprintf(stderr, "%d ", ja[i]);
-			fprintf(stderr, "\n");
-		}
 		mkl_pardiso_p(pt, maxfct, mnum, mtype, &ph, n, a, ia, ja, perm, &safe_nrhs, my_iparm, msglvl, &ddum, &ddum, error);
-		fprintf(stderr, "PMKL: phase 11 done err=%d nnz=%d\n", *error, my_iparm[17]);
 		iparm[17] = my_iparm[17];		       /* nnz(L) -- same index in both libraries */
 		return;
 	}
