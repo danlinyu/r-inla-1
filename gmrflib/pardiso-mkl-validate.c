@@ -65,8 +65,12 @@ int main(void)
 	int n = 12, bw = 2;
 	int info = 0, one = 1;
 
+	setvbuf(stdout, NULL, _IONBF, 0);		       /* unbuffered: see output up to any crash */
+
+	GMRFLib_openmp = Calloc(1, GMRFLib_openmp_tp);	       /* the engine allocates this at startup */
 	GMRFLib_openmp->strategy = GMRFLib_OPENMP_STRATEGY_PARDISO;
 	GMRFLib_openmp_implement_strategy(GMRFLib_OPENMP_PLACES_OPTIMIZE, NULL, NULL);
+	GMRFLib_smtp = GMRFLib_SMTP_PARDISO;
 
 	GMRFLib_graph_tp *g = NULL;
 	GMRFLib_graph_mk_linear(&g, n, bw, 0);
