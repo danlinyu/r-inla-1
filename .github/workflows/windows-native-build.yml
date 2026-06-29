@@ -296,8 +296,8 @@ jobs:
           done
           cat > bundle/README.txt <<'TXT'
           R-INLA — native Windows build of the `inla` engine (built from source, MSYS2/UCRT64 MinGW-w64).
-          Solver: TAUCS (PARDISO not included). Validated against the official INLA engine on 7 model
-          families: gaussian / poisson / binomial; fixed / iid / rw1 / besag / SPDE-2D; eb + ccd integration.
+          Solver: TAUCS (PARDISO not included). Validated against the official INLA engine on 6 models
+          spanning likelihoods gaussian/poisson/binomial; latent fixed/iid/rw1/besag/SPDE-2D; eb + ccd integration.
           All fixed effects and latent fields matched to 1e-6..1e-16.
 
           Usage from R (with the INLA R package installed):
