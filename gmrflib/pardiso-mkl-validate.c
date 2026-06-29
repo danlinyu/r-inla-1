@@ -16,11 +16,10 @@
 #include <math.h>
 #include "GMRFLib/GMRFLib.h"
 
-/* LAPACK (column-major, Fortran) from OpenBLAS */
-extern void dpotrf_(const char *, int *, double *, int *, int *);
-extern void dpotrs_(const char *, int *, int *, double *, int *, double *, int *, int *);
-extern void dpotri_(const char *, int *, double *, int *, int *);
-extern void dtrsv_(const char *, const char *, const char *, int *, double *, int *, double *, int *);
+/* dpotrf_/dpotrs_/dpotri_ are declared by GMRFLib's lapack-interface.h (with the
+ * trailing hidden Fortran string-length arg). Only dtrsv_ needs declaring here. */
+extern void dtrsv_(const char *, const char *, const char *, int *, double *, int *, double *, int *,
+		   FORTRAN_CHARLEN_T, FORTRAN_CHARLEN_T, FORTRAN_CHARLEN_T);
 
 static double q_diag(int i)
 {
@@ -76,7 +75,7 @@ int main(void)
 	for (int i = 0; i < n * n; i++) {
 		L[i] = Q[i];
 	}
-	dpotrf_("L", &n, L, &n, &info);			       /* L (lower) : Q = L L^T */
+	dpotrf_("L", &n, L, &n, &info, 1);			       /* L (lower) : Q = L L^T */
 	double ref_logdet = 0.0;
 	for (int i = 0; i < n; i++) {
 		ref_logdet += 2.0 * log(L[i + i * n]);
@@ -86,8 +85,8 @@ int main(void)
 	for (int i = 0; i < n * n; i++) {
 		Qi_ref[i] = Q[i];
 	}
-	dpotrf_("L", &n, Qi_ref, &n, &info);
-	dpotri_("L", &n, Qi_ref, &n, &info);		       /* lower triangle = Q^{-1} */
+	dpotrf_("L", &n, Qi_ref, &n, &info, 1);
+	dpotri_("L", &n, Qi_ref, &n, &info, 1);		       /* lower triangle = Q^{-1} */
 	for (int i = 0; i < n; i++) {			       /* symmetrise */
 		for (int j = 0; j < i; j++) {
 			Qi_ref[j + i * n] = Qi_ref[i + j * n];
@@ -118,7 +117,7 @@ int main(void)
 		xref[i] = b[i];
 	}
 	GMRFLib_pardiso_solve_LLT(store, x, x, 1);
-	dpotrs_("L", &n, &one, L, &n, xref, &n, &info);
+	dpotrs_("L", &n, &one, L, &n, xref, &n, &info, 1);
 	printf("[solve_LLT] max|x - Q^{-1}b| = %.3e\n", maxabs_diff(x, xref, n));
 
 	/* L solve : L y = b */
@@ -129,7 +128,7 @@ int main(void)
 		yLref[i] = b[i];
 	}
 	GMRFLib_pardiso_solve_L(store, yL, yL, 1);
-	dtrsv_("L", "N", "N", &n, L, &n, yLref, &one);
+	dtrsv_("L", "N", "N", &n, L, &n, yLref, &one, 1, 1, 1);
 	printf("[solve_L]   max|y - L^{-1}b|   = %.3e\n", maxabs_diff(yL, yLref, n));
 
 	/* L^T solve : L^T y = b */
@@ -140,7 +139,7 @@ int main(void)
 		yTref[i] = b[i];
 	}
 	GMRFLib_pardiso_solve_LT(store, yT, yT, 1);
-	dtrsv_("L", "T", "N", &n, L, &n, yTref, &one);
+	dtrsv_("L", "T", "N", &n, L, &n, yTref, &one, 1, 1, 1);
 	printf("[solve_LT]  max|y - L^{-T}b|   = %.3e\n", maxabs_diff(yT, yTref, n));
 
 	/* selected inverse */
