@@ -168,29 +168,35 @@ int main(void)
 	dpotrs_("L", &n, &one, L, &n, xref, &n, &info, 1);
 	printf("[solve_LLT] max|x - Q^{-1}b| = %.3e\n", maxabs_diff(x, xref, n));
 
-	/* L solve : L y = b */
-	double *yL = Calloc(n, double);
-	double *yLref = Calloc(n, double);
+	/* solve_L / solve_LT correctness is NOT agreement with the dense Cholesky factor
+	 * (oneMKL uses a different, permuted square root S = P^T L D^{1/2}). The correct
+	 * tests are the square-root properties GMRFLib relies on for sampling:
+	 *   (1) composition:  solve_LT(solve_L(b)) == Q^{-1} b   (since S^{-T} S^{-1}=Q^{-1})
+	 *   (2) adjoint:      <solve_L(u), v> == <u, solve_LT(v)>  (solve_LT = solve_L^T) */
+	double *comp = Calloc(n, double);
 	for (int i = 0; i < n; i++) {
-		yL[i] = b[i];
-		yLref[i] = b[i];
+		comp[i] = b[i];
 	}
-	TRACE("solve_L");
-	GMRFLib_pardiso_solve_L(store, yL, yL, 1);
-	dtrsv_("L", "N", "N", &n, L, &n, yLref, &one, 1, 1, 1);
-	printf("[solve_L]   max|y - L^{-1}b|   = %.3e\n", maxabs_diff(yL, yLref, n));
+	GMRFLib_pardiso_solve_L(store, comp, comp, 1);
+	GMRFLib_pardiso_solve_LT(store, comp, comp, 1);
+	printf("[sqrt comp] max|S^{-T}S^{-1}b - Q^{-1}b| = %.3e\n", maxabs_diff(comp, xref, n));
 
-	/* L^T solve : L^T y = b */
-	double *yT = Calloc(n, double);
-	double *yTref = Calloc(n, double);
+	double *u = Calloc(n, double), *v = Calloc(n, double);
+	double *Lu = Calloc(n, double), *LTv = Calloc(n, double);
 	for (int i = 0; i < n; i++) {
-		yT[i] = b[i];
-		yTref[i] = b[i];
+		u[i] = 1.0 + sin(0.7 * i);
+		v[i] = cos(0.4 * i) - 0.3;
+		Lu[i] = u[i];
+		LTv[i] = v[i];
 	}
-	TRACE("solve_LT");
-	GMRFLib_pardiso_solve_LT(store, yT, yT, 1);
-	dtrsv_("L", "T", "N", &n, L, &n, yTref, &one, 1, 1, 1);
-	printf("[solve_LT]  max|y - L^{-T}b|   = %.3e\n", maxabs_diff(yT, yTref, n));
+	GMRFLib_pardiso_solve_L(store, Lu, Lu, 1);
+	GMRFLib_pardiso_solve_LT(store, LTv, LTv, 1);
+	double d1 = 0.0, d2 = 0.0;
+	for (int i = 0; i < n; i++) {
+		d1 += Lu[i] * v[i];
+		d2 += u[i] * LTv[i];
+	}
+	printf("[sqrt adj]  |<S^{-1}u,v> - <u,S^{-T}v>| = %.3e\n", fabs(d1 - d2));
 
 	/* selected inverse */
 	TRACE("Qinv");

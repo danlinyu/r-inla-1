@@ -323,13 +323,17 @@ void pardiso(void *pt, int *maxfct, int *mnum, int *mtype, int *phase, int *n,
 
 	if (caller_phase == 33) {
 		/* GMRFLib encodes the solve mode in iparm[25] (Panua iparm(26)):
-		 *   0           -> full solve   (LL^T x = b)
-		 *   1  or -12   -> lower solve  (L  x = b), Cholesky convention Q=LL^T
-		 *   2  or -23   -> upper solve  (L^T x = b)
-		 * oneMKL selects these with phase 33 / 331 / 333. Because oneMKL factors
-		 * with a UNIT lower factor (Q = L D L^T), the Cholesky-convention L equals
-		 * L_unit * D^{1/2}; we apply the D^{1/2} scaling explicitly. The validation
-		 * harness checks whether this matches the dense Cholesky reference. */
+		 *   0           -> full solve   (Q x = b)
+		 *   1  or -12   -> "L"  solve   x = S^{-1} b
+		 *   2  or -23   -> "L^T" solve  x = S^{-T} b
+		 * where S is a square root of Q (S S^T = Q). oneMKL factors P Q P^T = L D L^T
+		 * (UNIT lower L), so a valid square root is S = P^T L D^{1/2}, giving
+		 *   S^{-1} b = D^{-1/2} (L^{-1} P b)      -> oneMKL fwd-solve (331) then scale
+		 *   S^{-T} b = P^T L^{-T} (D^{-1/2} b)    -> scale then oneMKL bwd-solve (333)
+		 * These are mutual adjoints and compose to Q^{-1} (S^{-T}S^{-1}=Q^{-1}); this
+		 * is what GMRFLib needs for sampling, NOT agreement with any particular dense
+		 * Cholesky factor. D is the pivot diagonal cached at factorization (getdiag),
+		 * which lives in the same internal ordering oneMKL's 331/333 operate in. */
 		int mode = iparm[25];
 		int nr = *nrhs;
 		int nn = *n;
@@ -340,25 +344,33 @@ void pardiso(void *pt, int *maxfct, int *mnum, int *mtype, int *phase, int *n,
 			return;
 		}
 
-		/* L / L^T solves: forward (331) or backward (333) substitution */
-		int ph = (mode == 1 || mode == -12) ? 331 : 333;
-		mkl_pardiso_p(pt, maxfct, mnum, mtype, &ph, n, a, ia, ja, &idum, nrhs, my_iparm, msglvl, b, x, error);
-
-		/* apply the D^{1/2} scaling that turns the unit-L solve into the
-		 * Cholesky-L solve. (Validated empirically; may be refined.) */
 		pmkl_scratch_tp *s = pmkl_scratch_get(pt, 0);
-		if (s && s->D && s->n == nn) {
-			for (int j = 0; j < nr; j++) {
-				double *xx = x + j * nn;
-				for (int i = 0; i < nn; i++) {
-					double sd = sqrt(fabs(s->D[i]));
-					if (ph == 331) {
-						xx[i] /= sd;	       /* L = L_unit D^{1/2} */
-					} else {
-						xx[i] /= sd;
+		int have_D = (s && s->D && s->n == nn);
+
+		if (mode == 1 || mode == -12) {
+			/* x = D^{-1/2} (L^{-1} P b): forward solve, then scale */
+			int ph = 331;
+			mkl_pardiso_p(pt, maxfct, mnum, mtype, &ph, n, a, ia, ja, &idum, nrhs, my_iparm, msglvl, b, x, error);
+			if (have_D) {
+				for (int j = 0; j < nr; j++) {
+					double *xx = x + j * nn;
+					for (int i = 0; i < nn; i++) {
+						xx[i] /= sqrt(fabs(s->D[i]));
 					}
 				}
 			}
+		} else {
+			/* x = P^T L^{-T} (D^{-1/2} b): scale b, then backward solve */
+			double *bb = (double *) malloc((size_t) nn * nr * sizeof(double));
+			for (int j = 0; j < nr; j++) {
+				double *src = b + j * nn, *dst = bb + j * nn;
+				for (int i = 0; i < nn; i++) {
+					dst[i] = have_D ? (src[i] / sqrt(fabs(s->D[i]))) : src[i];
+				}
+			}
+			int ph = 333;
+			mkl_pardiso_p(pt, maxfct, mnum, mtype, &ph, n, a, ia, ja, &idum, nrhs, my_iparm, msglvl, bb, x, error);
+			free(bb);
 		}
 		return;
 	}
