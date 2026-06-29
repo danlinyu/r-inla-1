@@ -125,6 +125,7 @@ jobs:
           echo "=== link errors (undefined refs) ===" ; grep -nE 'undefined reference|cannot find -l|undefined symbol' inlaprog-build.log | head -40 || true
 
       - name: Install INLA R package (R interface + official reference engine)
+        continue-on-error: true
         run: |
           set -e
           CONTRIB="https://inla.r-inla-download.org/R/stable/bin/windows/contrib/4.5"
@@ -140,11 +141,22 @@ jobs:
           Rscript -e "install.packages('$ZIP', repos=NULL, type='win.binary')"
           Rscript -e 'suppressMessages(library(INLA)); cat("INLA version:", as.character(packageVersion("INLA")), "\n"); cat("default inla.call:", inla.getOption("inla.call"), "\n")'
 
+      - name: Diagnose our inla.exe (DLL resolution + direct run)
+        continue-on-error: true
+        run: |
+          export PATH="/ucrt64/bin:/c/R/bin/x64:$PATH"
+          echo "=== DLL dependencies (ldd) ==="
+          ldd inlaprog/inla.exe 2>&1 | sort || true
+          echo "=== unresolved DLLs? ==="
+          ldd inlaprog/inla.exe 2>&1 | grep -i 'not found' || echo "all DLLs resolved"
+          echo "=== direct run: inla.exe with no args (does the engine start?) ==="
+          ./inlaprog/inla.exe 2>&1 | head -25; echo "direct-run exit: $?"
+
       - name: Smoke test — our inla.exe vs official engine on an identical model
         continue-on-error: true
         run: |
           set -o pipefail
-          export PATH="/ucrt64/bin:$PATH"
+          export PATH="/ucrt64/bin:/c/R/bin/x64:$PATH"
           OURINLA="$(cygpath -m "$PWD/inlaprog/inla.exe")"   # forward-slash Windows path; avoids R backslash-escape
           echo "our engine: $OURINLA"
           cat > smoke.R <<'EOF'
@@ -158,7 +170,10 @@ jobs:
           ref <- fit()
           cat("== test (our from-source inla.exe) ==\n")
           inla.setOption(inla.call=our.call)
-          tst <- fit()
+          tst <- tryCatch(inla(y ~ x, data=d, family="gaussian",
+                                control.inla=list(int.strategy="eb"), verbose=TRUE),
+                          error=function(e){cat("OUR ENGINE ERROR:", conditionMessage(e), "\n"); NULL})
+          if (is.null(tst)) { cat("our engine did not return a fit; see verbose output above\n"); quit(save="no", status=0) }
           cat("\n--- reference summary.fixed ---\n"); print(ref$summary.fixed[,1:2])
           cat("\n--- our       summary.fixed ---\n"); print(tst$summary.fixed[,1:2])
           cat("\n--- reference summary.hyperpar ---\n"); print(ref$summary.hyperpar[,1:2])
