@@ -179,43 +179,62 @@ jobs:
           our.call <- commandArgs(trailingOnly=TRUE)[1]
           set.seed(1)
 
-          ## A matrix of models that exercise distinct engine code paths:
-          ## gaussian LM (baseline), Poisson+iid (likelihood+latent), rw1
-          ## (structured sparse GMRF), besag (irregular-graph GMRF -> reordering /
-          ## taucs permute -> the reimplemented function; also checks the spatial field).
-          make_cases <- function() {
-            cs <- list()
-            n <- 50; x <- rnorm(n); y <- 1 + 2*x + rnorm(n)
-            cs$gaussian_lm <- list(f=y ~ x, fam="gaussian", d=data.frame(y=y, x=x))
-            n <- 100; x <- rnorm(n); id <- 1:n
-            yp <- rpois(n, exp(0.5 + 0.3*x + rnorm(n, sd=0.2)))
-            cs$poisson_iid <- list(f=yp ~ x + f(id, model="iid"), fam="poisson",
-                                   d=data.frame(yp=yp, x=x, id=id))
-            n <- 60; t <- 1:n
-            yr <- 2*sin(2*pi*t/n) + rnorm(n, sd=0.4)
-            cs$rw1 <- list(f=yr ~ f(t, model="rw1"), fam="gaussian",
-                           d=data.frame(yr=yr, t=t))
-            ns <- 30; A <- Matrix(0, ns, ns, sparse=TRUE)
-            for (i in 1:(ns-1)) { A[i,i+1] <- 1; A[i+1,i] <- 1 }
-            g <- inla.read.graph(A)
-            sp <- cumsum(rnorm(ns, sd=0.3)); sp <- sp - mean(sp)
-            yb <- 1 + sp + rnorm(ns, sd=0.3)
-            cs$besag <- list(f=yb ~ f(s, model="besag", graph=g), fam="gaussian",
-                             d=data.frame(yb=yb, s=1:ns))
-            cs
-          }
-          run1 <- function(cs) inla(cs$f, family=cs$fam, data=cs$d,
-                                    control.compute=list(dic=FALSE),
-                                    control.inla=list(int.strategy="eb"))
-          cases <- make_cases()
+          ## Each case is a self-contained closure that re-seeds + rebuilds its data,
+          ## so the REFERENCE run and the TEST run get bit-identical inputs. The matrix
+          ## spans likelihoods (gaussian/poisson/binomial), latent structures
+          ## (fixed/iid/rw1/besag/SPDE-2D), full hyperparameter integration (ccd, not
+          ## just modal eb), and the sparse/spatial solver path (besag + SPDE exercise
+          ## reordering -> the reimplemented taucs permute).
+          cases <- list(
+            gaussian_lm = function() {
+              set.seed(1); n <- 50; x <- rnorm(n); y <- 1 + 2*x + rnorm(n)
+              inla(y ~ x, family="gaussian", data=data.frame(y, x),
+                   control.inla=list(int.strategy="eb")) },
+            poisson_iid = function() {
+              set.seed(2); n <- 100; x <- rnorm(n); id <- 1:n
+              yp <- rpois(n, exp(0.5 + 0.3*x + rnorm(n, sd=0.2)))
+              inla(yp ~ x + f(id, model="iid"), family="poisson",
+                   data=data.frame(yp, x, id), control.inla=list(int.strategy="eb")) },
+            binomial_iid = function() {
+              set.seed(3); n <- 120; x <- rnorm(n); id <- 1:n
+              eta <- -0.2 + 0.8*x + rnorm(n, sd=0.3); p <- 1/(1+exp(-eta))
+              yb <- rbinom(n, 1, p)
+              inla(yb ~ x + f(id, model="iid"), family="binomial", Ntrials=1,
+                   data=data.frame(yb, x, id), control.inla=list(int.strategy="eb")) },
+            rw1_ccd = function() {           # full hyperparameter integration (CCD)
+              set.seed(4); n <- 60; t <- 1:n
+              yr <- 2*sin(2*pi*t/n) + rnorm(n, sd=0.4)
+              inla(yr ~ f(t, model="rw1"), family="gaussian", data=data.frame(yr, t),
+                   control.inla=list(int.strategy="ccd")) },
+            besag = function() {
+              set.seed(5); ns <- 30; A <- Matrix(0, ns, ns, sparse=TRUE)
+              for (i in 1:(ns-1)) { A[i,i+1] <- 1; A[i+1,i] <- 1 }
+              g <- inla.read.graph(A); sp <- cumsum(rnorm(ns, sd=0.3)); sp <- sp - mean(sp)
+              yb <- 1 + sp + rnorm(ns, sd=0.3)
+              inla(yb ~ f(s, model="besag", graph=g), family="gaussian",
+                   data=data.frame(yb, s=1:ns), control.inla=list(int.strategy="eb")) },
+            spde2d = function() {            # 2D SPDE: mesh + Matern field + sparse solve
+              set.seed(6); n <- 200; loc <- matrix(runif(2*n), n, 2)
+              mesh <- fm_mesh_2d(loc, max.edge=c(0.1, 0.3), cutoff=0.05)
+              spde <- inla.spde2.pcmatern(mesh, prior.range=c(0.3, 0.5), prior.sigma=c(1, 0.5))
+              field <- sin(3*loc[,1]) + cos(3*loc[,2])
+              y <- 1 + field + rnorm(n, sd=0.3)
+              A <- inla.spde.make.A(mesh, loc); idx <- inla.spde.make.index("s", spde$n.spde)
+              stk <- inla.stack(data=list(y=y), A=list(A, 1),
+                                effects=list(idx, list(b0=rep(1, n))), tag="e")
+              inla(y ~ 0 + b0 + f(s, model=spde), family="gaussian",
+                   data=inla.stack.data(stk),
+                   control.predictor=list(A=inla.stack.A(stk)),
+                   control.inla=list(int.strategy="eb")) }
+          )
 
           cat("=== REFERENCE (official engine) ===\n")
           ref <- setNames(lapply(names(cases), function(nm)
-            tryCatch(run1(cases[[nm]]), error=function(e){cat("REF FAIL",nm,":",conditionMessage(e),"\n");NULL})), names(cases))
+            tryCatch(cases[[nm]](), error=function(e){cat("REF FAIL",nm,":",conditionMessage(e),"\n");NULL})), names(cases))
           cat("=== TEST (our from-source inla.exe) ===\n")
           inla.setOption(inla.call=our.call)
           tst <- setNames(lapply(names(cases), function(nm)
-            tryCatch(run1(cases[[nm]]), error=function(e){cat("OUR FAIL",nm,":",conditionMessage(e),"\n");NULL})), names(cases))
+            tryCatch(cases[[nm]](), error=function(e){cat("OUR FAIL",nm,":",conditionMessage(e),"\n");NULL})), names(cases))
 
           allpass <- TRUE
           for (nm in names(cases)) {
