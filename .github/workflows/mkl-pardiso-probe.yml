@@ -1,0 +1,173 @@
+name: mkl-pardiso-probe
+
+# License-clean PARDISO-via-MKL, probe phase.
+# Goal: empirically settle the integration unknowns in ISOLATION (no GMRFLib yet):
+#   (1) install Intel oneMKL on a GitHub windows-latest runner via pip wheels;
+#   (2) link mkl_rt from the MSYS2/UCRT64 MinGW gcc toolchain (import lib from the DLL);
+#   (3) make MKL coexist with GNU OpenMP (libgomp) via MKL_THREADING_LAYER=GNU;
+#   (4) confirm the standard PARDISO factor/solve API + log-determinant via pardiso_getdiag.
+# This uses ONLY the publicly documented Intel oneMKL PARDISO interface. No Panua code.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - name: Set up MSYS2 (UCRT64)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          path-type: inherit
+          install: >-
+            base-devel
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-tools-git
+
+      - name: Set up Python
+        shell: cmd
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install mkl mkl-devel mkl-include
+          python -c "import sysconfig,sys; print(sys.prefix)"
+
+      - name: Locate MKL artifacts (DLL + headers)
+        run: |
+          set -e
+          # pip installs into the Python prefix; find mkl_rt DLL, mkl_pardiso.h, mkl.h
+          PYPREFIX="$(python -c 'import sys;print(sys.prefix)')"
+          PYPREFIX="$(cygpath -u "$PYPREFIX")"
+          echo "PYPREFIX=$PYPREFIX"
+          echo "--- searching for mkl_rt DLL ---"
+          MKL_DLL="$(find "$PYPREFIX" -iname 'mkl_rt*.dll' | head -1)"
+          echo "MKL_DLL=$MKL_DLL"
+          echo "--- searching for headers ---"
+          MKL_PARDISO_H="$(find "$PYPREFIX" -iname 'mkl_pardiso.h' | head -1)"
+          MKL_H="$(find "$PYPREFIX" -iname 'mkl.h' | head -1)"
+          echo "MKL_PARDISO_H=$MKL_PARDISO_H"
+          echo "MKL_H=$MKL_H"
+          test -n "$MKL_DLL" && test -n "$MKL_PARDISO_H" || { echo "MKL artifacts not found"; exit 1; }
+          INCDIR="$(dirname "$MKL_H")"
+          DLLDIR="$(dirname "$MKL_DLL")"
+          # persist for later steps
+          echo "MKL_DLL=$MKL_DLL"   >> "$GITHUB_ENV"
+          echo "MKL_INCDIR=$INCDIR" >> "$GITHUB_ENV"
+          echo "MKL_DLLDIR=$DLLDIR" >> "$GITHUB_ENV"
+
+      - name: Generate MinGW import library for mkl_rt
+        run: |
+          set -e
+          cd "$RUNNER_TEMP"
+          cp "$MKL_DLL" .
+          BASE="$(basename "$MKL_DLL")"
+          echo "Generating .def from $BASE"
+          gendef "$BASE"
+          DEF="$(ls *.def | head -1)"
+          echo "DEF=$DEF"
+          # quick visibility: are the pardiso symbols exported?
+          grep -iE 'pardiso(init|_getdiag)?\b' "$DEF" | head -20 || true
+          dlltool -d "$DEF" -l libmkl_rt.dll.a -D "$BASE"
+          ls -l libmkl_rt.dll.a
+          echo "IMPLIB_DIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
+
+      - name: Write the probe program
+        run: |
+          cat > "$RUNNER_TEMP/probe.c" <<'EOF'
+          /* License-clean Intel oneMKL PARDISO probe. Standard documented API only.
+             SPD test matrix A = [[4,1,0],[1,4,1],[0,1,4]], det = 56 -> log det = 4.025352.
+             Upper-triangular CSR, 1-based indexing (MKL default iparm[34]=0). */
+          #include <stdio.h>
+          #include <math.h>
+          #include "mkl.h"
+          #include "mkl_pardiso.h"
+
+          int main(void) {
+              MKL_INT n = 3;
+              MKL_INT ia[4] = {1, 3, 5, 6};
+              MKL_INT ja[5] = {1, 2, 2, 3, 3};
+              double   a[5] = {4.0, 1.0, 4.0, 1.0, 4.0};
+              double   b[3] = {1.0, 1.0, 1.0};
+              double   x[3] = {0.0, 0.0, 0.0};
+
+              void *pt[64] = {0};
+              MKL_INT iparm[64] = {0};
+              MKL_INT mtype = 2;            /* real symmetric positive definite */
+              MKL_INT maxfct = 1, mnum = 1, msglvl = 0, error = 0;
+              MKL_INT phase, nrhs = 1;
+              MKL_INT idum; double ddum;
+
+              pardisoinit(pt, &mtype, iparm);   /* MKL 3-arg form */
+              iparm[34] = 0;                    /* 1-based indexing */
+
+              phase = 11;                       /* analysis */
+              pardiso(pt, &maxfct, &mnum, &mtype, &phase, &n, a, ia, ja,
+                      &idum, &nrhs, iparm, &msglvl, &ddum, &ddum, &error);
+              printf("phase 11 error=%d  nnz(L)=%d\n", (int)error, (int)iparm[17]);
+              if (error) return 10;
+
+              phase = 22;                       /* numerical factorization */
+              pardiso(pt, &maxfct, &mnum, &mtype, &phase, &n, a, ia, ja,
+                      &idum, &nrhs, iparm, &msglvl, &ddum, &ddum, &error);
+              printf("phase 22 error=%d\n", (int)error);
+              if (error) return 20;
+
+              /* log-determinant via the diagonal D of the LDL^T factor */
+              double df[3] = {0,0,0}, da[3] = {0,0,0};
+              error = 0;
+              pardiso_getdiag((const void *)pt, df, da, &mnum, &error);
+              printf("getdiag error=%d  D=[%g %g %g]\n", (int)error, df[0], df[1], df[2]);
+              if (!error) {
+                  double logdet = 0.0;
+                  for (int i = 0; i < 3; i++) logdet += log(fabs(df[i]));
+                  printf("logdet(MKL)=%.6f   expected=%.6f   diff=%.2e\n",
+                         logdet, log(56.0), fabs(logdet - log(56.0)));
+              }
+
+              phase = 33;                       /* solve A x = b */
+              pardiso(pt, &maxfct, &mnum, &mtype, &phase, &n, a, ia, ja,
+                      &idum, &nrhs, iparm, &msglvl, b, x, &error);
+              printf("phase 33 error=%d  x=[%g %g %g]\n", (int)error, x[0], x[1], x[2]);
+              if (error) return 33;
+              /* residual: A x should equal b=[1,1,1]; A is the full symmetric matrix */
+              double Ax[3];
+              Ax[0] = 4*x[0] + 1*x[1];
+              Ax[1] = 1*x[0] + 4*x[1] + 1*x[2];
+              Ax[2] = 1*x[1] + 4*x[2];
+              double r = 0.0;
+              for (int i = 0; i < 3; i++) r += (Ax[i]-1.0)*(Ax[i]-1.0);
+              printf("solve residual ||Ax-b|| = %.2e\n", sqrt(r));
+
+              phase = -1;                       /* release */
+              pardiso(pt, &maxfct, &mnum, &mtype, &phase, &n, &ddum, ia, ja,
+                      &idum, &nrhs, iparm, &msglvl, &ddum, &ddum, &error);
+              printf("PROBE OK\n");
+              return 0;
+          }
+          EOF
+          echo "wrote probe.c"
+
+      - name: Compile the probe (MinGW gcc -> mkl_rt)
+        run: |
+          set -e
+          cd "$RUNNER_TEMP"
+          gcc -O2 -fopenmp -I"$MKL_INCDIR" probe.c \
+              -L"$IMPLIB_DIR" -lmkl_rt.dll -o probe.exe
+          echo "compiled. dependencies:"
+          ldd probe.exe | grep -i mkl || true
+
+      - name: Run the probe (GNU OpenMP threading layer)
+        run: |
+          set -e
+          cd "$RUNNER_TEMP"
+          # put mkl_rt + the python/Library bin on PATH so the loader finds the DLLs
+          export PATH="$MKL_DLLDIR:$IMPLIB_DIR:$PATH"
+          # the lynchpin for MKL <-> GNU libgomp coexistence:
+          export MKL_THREADING_LAYER=GNU
+          export MKL_INTERFACE_LAYER=LP64
+          export OMP_NUM_THREADS=2
+          ./probe.exe
