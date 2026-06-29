@@ -87,19 +87,24 @@ jobs:
           echo "linked. mkl deps (none expected at link time):"
           ldd validate.exe | grep -i mkl || echo "  (none -- adapter loads mkl_rt at runtime)"
 
-      - name: Run validation (TBB-threaded MKL)
+      - name: Run validation staged (SEQ baseline, TBB no-knob, TBB knob)
         run: |
-          set -e
-          # tbb12.dll ships in the python prefix alongside mkl_rt; make sure the
-          # MKL TBB threading layer (mkl_tbb_thread.3.dll -> tbb12.dll) can load it.
-          PYPREFIX="$(cygpath -u "$(python -c 'import sys;print(sys.prefix)')")"
-          TBB_DLL="$(find "$PYPREFIX" -iname 'tbb12*.dll' | head -1)"
-          echo "tbb12 at: $TBB_DLL"
-          [ -n "$TBB_DLL" ] && cp -v "$TBB_DLL" "$MKL_DLLDIR/" || true
+          # tbb12.dll ships in the python prefix alongside mkl_rt (same dir as
+          # MKL_DLLDIR); the MKL TBB threading layer (mkl_tbb_thread.3.dll) needs it.
           cp validate.exe "$MKL_DLLDIR/"
           cd "$MKL_DLLDIR"
           export PATH="$PATH:/ucrt64/bin"
-          export MKL_THREADING_LAYER=TBB
-          export MKL_NUM_THREADS=4
           export MKL_INTERFACE_LAYER=LP64
-          ./validate.exe
+          export MKL_VERBOSE=1
+          run () {
+            echo "==================== $1 ===================="
+            ( shift; env "$@" ./validate.exe ) ; echo "[exit=$?]"
+            echo
+          }
+          # 1) sequential baseline -- confirms my adapter change did not regress
+          run "SEQUENTIAL (baseline)"        MKL_THREADING_LAYER=SEQUENTIAL
+          # 2) TBB but NO MKL_NUM_THREADS -> adapter's mkl_set_num_threads block is
+          #    skipped (nt=0). Isolates whether the TBB *layer* alone segfaults.
+          run "TBB (no thread knob)"         MKL_THREADING_LAYER=TBB
+          # 3) TBB + MKL_NUM_THREADS=4 -> full path (adapter pins thread count)
+          run "TBB + MKL_NUM_THREADS=4"      MKL_THREADING_LAYER=TBB MKL_NUM_THREADS=4
