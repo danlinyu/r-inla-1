@@ -105,6 +105,7 @@ jobs:
 
               pardisoinit(pt, &mtype, iparm);   /* MKL 3-arg form */
               iparm[34] = 0;                    /* 1-based indexing */
+              iparm[55] = 1;                    /* iparm(56): store diagonal for pardiso_getdiag */
 
               phase = 11;                       /* analysis */
               pardiso(pt, &maxfct, &mnum, &mtype, &phase, &n, a, ia, ja,
@@ -123,11 +124,13 @@ jobs:
               error = 0;
               pardiso_getdiag(pt, df, da, &mnum, &error);
               printf("getdiag error=%d  D=[%g %g %g]\n", (int)error, df[0], df[1], df[2]);
+              printf("getdiag: da(orig diag)=[%g %g %g]\n", da[0], da[1], da[2]);
               if (!error) {
-                  double logdet = 0.0;
-                  for (int i = 0; i < 3; i++) logdet += log(fabs(df[i]));
-                  printf("logdet(MKL)=%.6f   expected=%.6f   diff=%.2e\n",
-                         logdet, log(56.0), fabs(logdet - log(56.0)));
+                  double prod = df[0]*df[1]*df[2];
+                  double s1 = log(fabs(df[0]))+log(fabs(df[1]))+log(fabs(df[2]));
+                  printf("prod(df)=%g   (det A = 56)\n", prod);
+                  printf("logdet candidate sum(log|df|)=%.6f   expected log(56)=%.6f   diff=%.2e\n",
+                         s1, log(56.0), fabs(s1 - log(56.0)));
               }
 
               phase = 33;                       /* solve A x = b */
@@ -178,5 +181,22 @@ jobs:
           # make ucrt64 runtime (libgomp etc.) Windows-loadable too
           export PATH="$PATH:/ucrt64/bin"
           export MKL_THREADING_LAYER=SEQUENTIAL
+          export MKL_INTERFACE_LAYER=LP64
+          ./probe.exe
+
+      - name: Run the probe (TBB-threaded MKL — parallel without OpenMP clash)
+        continue-on-error: true
+        run: |
+          set -e
+          # TBB is not OpenMP, so MKL-internal parallelism can coexist with the
+          # app's GNU libgomp without a dual-OpenMP-runtime clash. Find the tbb DLL.
+          echo "--- tbb DLLs available ---"
+          find /c/hostedtoolcache/windows/Python -iname 'tbb*.dll' 2>/dev/null | head || true
+          TBBDIR="$(dirname "$(find /c/hostedtoolcache/windows/Python -iname 'tbb12*.dll' 2>/dev/null | head -1)")"
+          echo "TBBDIR=$TBBDIR"
+          cd "$MKL_DLLDIR"
+          [ -n "$TBBDIR" ] && cp "$TBBDIR"/tbb*.dll . 2>/dev/null || true
+          export PATH="$PATH:/ucrt64/bin"
+          export MKL_THREADING_LAYER=TBB
           export MKL_INTERFACE_LAYER=LP64
           ./probe.exe
