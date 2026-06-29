@@ -187,6 +187,7 @@ void pardiso(void *pt, int *maxfct, int *mnum, int *mtype, int *phase, int *n,
 	pmkl_load();
 
 	int caller_phase = *phase;
+	fprintf(stderr, "PMKL: pardiso enter phase=%d n=%d nrhs=%d\n", caller_phase, *n, *nrhs);
 	int idum = 0;
 	double ddum = 0.0;
 	int safe_nrhs = 1;				       /* GMRFLib passes nrhs=-1 for analysis; oneMKL wants >=1 */
@@ -217,6 +218,7 @@ void pardiso(void *pt, int *maxfct, int *mnum, int *mtype, int *phase, int *n,
 	if (caller_phase == 11) {
 		int ph = 11;
 		mkl_pardiso_p(pt, maxfct, mnum, mtype, &ph, n, a, ia, ja, perm, &safe_nrhs, my_iparm, msglvl, &ddum, &ddum, error);
+		fprintf(stderr, "PMKL: phase 11 done err=%d nnz=%d\n", *error, my_iparm[17]);
 		iparm[17] = my_iparm[17];		       /* nnz(L) -- same index in both libraries */
 		return;
 	}
