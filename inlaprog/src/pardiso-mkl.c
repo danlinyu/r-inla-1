@@ -299,6 +299,18 @@ void pardiso(void *pt, int *maxfct, int *mnum, int *mtype, int *phase, int *n,
 	mkl_pardiso_p(pt, maxfct, mnum, mtype, phase, n, a, ia, ja, perm, nrhs, my_iparm, msglvl, b, x, error);
 }
 
+/*
+ * GMRFLib's bundled TAUCS reordering calls METIS51PARDISO_NodeND (the name the
+ * Panua build used for METIS nested dissection). When the Panua library is absent
+ * this is normally provided by libpardiso.c; since the adapter replaces that file,
+ * provide it here as a thin wrapper over the system METIS (same as libpardiso.c).
+ */
+int METIS51PARDISO_NodeND(int *nvtxs, int *xadj, int *adjncy, int *vwgt, int *options, int *perm, int *iperm)
+{
+	int METIS_NodeND(int *, int *, int *, int *, int *, int *, int *);
+	return METIS_NodeND(nvtxs, xadj, adjncy, vwgt, options, perm, iperm);
+}
+
 /* Debug-only residual helper (GMRFLib calls it only under a hard-coded debug=0). */
 void pardiso_residual(int *mtype, int *n, double *a, int *ia, int *ja, double *b, double *x, double *y, double *norm_b, double *norm_res)
 {

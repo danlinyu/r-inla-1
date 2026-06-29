@@ -81,7 +81,7 @@ jobs:
           gcc -O2 -fopenmp -o validate.exe \
               validate.o pardiso-mkl.o \
               -L"$PREFIX/lib" -Wl,--start-group -lGMRFLib -ltaucs -Wl,--end-group \
-              -lgsl -lmetis -lopenblas -lcrypto -lgfortran -lquadmath -lm
+              -lgsl -lmetis -lopenblas -lcrypto -lz -lstdc++ -lgfortran -lquadmath -lm
           echo "linked. mkl deps (none expected at link time):"
           ldd validate.exe | grep -i mkl || echo "  (none -- adapter loads mkl_rt at runtime)"
 
