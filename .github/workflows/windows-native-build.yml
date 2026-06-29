@@ -139,9 +139,10 @@ jobs:
           Rscript -e 'options(timeout=1200); install.packages(c("sp","fmesher","MatrixModels","rlang","lifecycle","withr","foreach"), repos="https://packagemanager.posit.co/cran/latest")'
           # R's resolver flakes on the INLA server, so fetch the binary zip directly
           # (curl reaches it fine) and install from the local file.
-          INLA_VER="$(curl -s "$CONTRIB/PACKAGES" | awk '/^Version:/{print $2; exit}')"
+          RETRY="--retry 6 --retry-delay 8 --retry-all-errors --connect-timeout 30"
+          INLA_VER="$(curl -s $RETRY "$CONTRIB/PACKAGES" | awk '/^Version:/{print $2; exit}')"
           echo "INLA stable version for R 4.5: $INLA_VER"
-          curl -fsSL -o INLA.zip "$CONTRIB/INLA_${INLA_VER}.zip"
+          curl -fSL $RETRY -o INLA.zip "$CONTRIB/INLA_${INLA_VER}.zip"
           ls -la INLA.zip
           ZIP="$(cygpath -m "$PWD/INLA.zip")"
           Rscript -e "install.packages('$ZIP', repos=NULL, type='win.binary')"
