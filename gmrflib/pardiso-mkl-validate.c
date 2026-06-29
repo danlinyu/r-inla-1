@@ -84,6 +84,15 @@ int main(void)
 	GMRFLib_openmp->schedule = omp_sched_guided;
 	GMRFLib_openmp->chunk_size = 0;
 	GMRFLib_openmp->likelihood_nt = 0;
+
+	/* the engine's startup store-inits (inla.c) -- these globals are lazily set up */
+	GMRFLib_set_error_handler(NULL);
+	GMRFLib_init_constr_store();
+	GMRFLib_init_constr_store_logdet();
+	GMRFLib_graph_init_store();
+	GMRFLib_remap_init_store();
+	GMRFLib_csr_init_store();
+
 	TRACE("implement_strategy");
 	GMRFLib_openmp->strategy = GMRFLib_OPENMP_STRATEGY_PARDISO;
 	GMRFLib_openmp_implement_strategy(GMRFLib_OPENMP_PLACES_OPTIMIZE, NULL, NULL);
@@ -92,8 +101,6 @@ int main(void)
 	GMRFLib_graph_tp *g = NULL;
 	TRACE("graph_mk_linear");
 	GMRFLib_graph_mk_linear(&g, n, bw, 0);
-	Free(g->sha);					       /* skip the global graph_store cache in this standalone driver */
-	g->sha = NULL;
 
 	/* dense Q (column-major) for the reference */
 	double *Q = Calloc(n * n, double);
