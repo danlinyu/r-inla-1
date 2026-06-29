@@ -225,6 +225,16 @@ void pardiso(void *pt, int *maxfct, int *mnum, int *mtype, int *phase, int *n,
 
 	if (caller_phase == 11) {
 		int ph = 11;
+		if (*n <= 20) {
+			int nnz = ia[*n] - ia[0];
+			fprintf(stderr, "PMKL: csr n=%d nnz=%d iparm[34]=%d ia[0]=%d ia[n]=%d\n",
+				*n, nnz, my_iparm[34], ia[0], ia[*n]);
+			fprintf(stderr, "PMKL: ia=");
+			for (int i = 0; i <= *n; i++) fprintf(stderr, "%d ", ia[i]);
+			fprintf(stderr, "\nPMKL: ja=");
+			for (int i = 0; i < nnz; i++) fprintf(stderr, "%d ", ja[i]);
+			fprintf(stderr, "\n");
+		}
 		mkl_pardiso_p(pt, maxfct, mnum, mtype, &ph, n, a, ia, ja, perm, &safe_nrhs, my_iparm, msglvl, &ddum, &ddum, error);
 		fprintf(stderr, "PMKL: phase 11 done err=%d nnz=%d\n", *error, my_iparm[17]);
 		iparm[17] = my_iparm[17];		       /* nnz(L) -- same index in both libraries */
