@@ -172,7 +172,9 @@ void pardisoinit(void *pt, int *mtype, int *solver, int *iparm, double *dparm, i
 	fprintf(stderr, "PMKL: pardisoinit entry mtype=%d\n", *mtype);
 	pmkl_load();
 	fprintf(stderr, "PMKL: pardisoinit -> setup_iparm\n");
-	pmkl_setup_iparm(iparm, *mtype);
+	int mt = 2;					       /* SPD; see note in pardiso() */
+	(void) mtype;
+	pmkl_setup_iparm(iparm, mt);
 	fprintf(stderr, "PMKL: pardisoinit setup_iparm done\n");
 	for (int i = 0; i < 64; i++) {
 		((void **) pt)[i] = NULL;
@@ -191,6 +193,12 @@ void pardiso(void *pt, int *maxfct, int *mnum, int *mtype, int *phase, int *n,
 	int idum = 0;
 	double ddum = 0.0;
 	int safe_nrhs = 1;				       /* GMRFLib passes nrhs=-1 for analysis; oneMKL wants >=1 */
+
+	/* GMRF precision matrices are SPD; use oneMKL mtype=2 (real sym pos def) -- this is
+	 * the path proven in the standalone probe. GMRFLib passes -2 (Panua LDL^T convention);
+	 * for an indefinite Q oneMKL returns an error which surfaces as the usual pos-def retry. */
+	int mt = 2;
+	mtype = &mt;
 
 	/* our own clean oneMKL iparm, derived from the (mtype-correct) defaults */
 	int my_iparm[64];
