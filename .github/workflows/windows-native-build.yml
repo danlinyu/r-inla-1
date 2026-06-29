@@ -78,20 +78,26 @@ jobs:
           # INLA is built with MATHLIB_STANDALONE, so it references the Rmath
           # functions by their UNPREFIXED names (qgamma, dnorm4, ...). Windows R
           # ships no standalone libRmath, but R.dll exports the same functions
-          # Rf_-prefixed. Build a shim import library that aliases each unprefixed
-          # Rmath name to R.dll's Rf_ export, so no INLA source change is needed.
-          echo "LIBRARY R.dll" > Rmath.def
-          echo "EXPORTS" >> Rmath.def
-          # All Rf_-prefixed symbols R.dll exports, as a lookup set.
+          # Rf_-prefixed. Build a forwarder DLL whose unprefixed export `qgamma`
+          # FORWARDS at load time to R.Rf_qgamma, so no INLA source change is
+          # needed. (A plain import-lib alias does NOT work: it makes the loader
+          # look up the unprefixed name in R.dll, which fails 0xC0000139.)
+          echo "LIBRARY Rmathfwd.dll" > Rmathfwd.def
+          echo "EXPORTS" >> Rmathfwd.def
           grep -oE 'Rf_[A-Za-z0-9_]+' R.def | sort -u > rf-exports.txt
-          # Rmath function names declared in Rmath.h (the standalone API).
-          grep -oE '\b(d|p|q|r)(norm|unif|gamma|beta|binom|pois|t|f|chisq|cauchy|exp|geom|hyper|lnorm|logis|nbinom|weibull|wilcox|signrank|nbeta|nchisq|nt|nf|nbinom_mu)[0-9]*\b|\b(gammafn|lgammafn|digamma|trigamma|tetragamma|pentagamma|beta|lbeta|choose|lchoose|bessel_i|bessel_j|bessel_k|bessel_y|psigamma|sign|fsign|fround|fprec|ftrunc|log1p|expm1|gammafn|lgammafn|bessel_i_ex|bessel_k_ex)\b' "$RHOME/include/Rmath.h" | sort -u > rmath-names.txt
+          grep -oE '\b(d|p|q|r)(norm|unif|gamma|beta|binom|pois|t|f|chisq|cauchy|exp|geom|hyper|lnorm|logis|nbinom|weibull|wilcox|signrank|nbeta|nchisq|nt|nf|nbinom_mu)[0-9]*\b|\b(gammafn|lgammafn|digamma|trigamma|tetragamma|pentagamma|beta|lbeta|choose|lchoose|bessel_i|bessel_j|bessel_k|bessel_y|psigamma|sign|fsign|fround|fprec|ftrunc|log1p|expm1|bessel_i_ex|bessel_k_ex)\b' "$RHOME/include/Rmath.h" | sort -u > rmath-names.txt
           n=0
           while read fn; do
-            if grep -qx "Rf_$fn" rf-exports.txt; then echo "$fn = Rf_$fn" >> Rmath.def; n=$((n+1)); fi
+            # forwarder target uses the module base name without extension: R.dll -> R
+            if grep -qx "Rf_$fn" rf-exports.txt; then echo "$fn = R.Rf_$fn" >> Rmathfwd.def; n=$((n+1)); fi
           done < rmath-names.txt
-          echo "Rmath shim: aliased $n functions to R.dll Rf_ exports"
-          dlltool -d Rmath.def -l libRmath.dll.a && echo "generated libRmath.dll.a"
+          echo "Rmath forwarder: $n functions forwarded to R.dll Rf_ exports"
+          printf 'int __rmathfwd_dummy;\n' > rmathfwd_dummy.c
+          gcc -c rmathfwd_dummy.c -o rmathfwd_dummy.o
+          gcc -shared -o Rmathfwd.dll rmathfwd_dummy.o Rmathfwd.def -Wl,--out-implib,libRmathfwd.dll.a
+          echo "=== verify forwarders present in Rmathfwd.dll ==="
+          objdump -p Rmathfwd.dll | grep -iE 'forward' | head -5 || echo "WARN: no forwarder entries found"
+          ls -la Rmathfwd.dll libRmathfwd.dll.a
           echo "RBIN=$RBIN" >> "$GITHUB_ENV"
 
       - name: Generate cgeneric headers (empty tables; bundled external cgeneric pkgs disabled for MVP)
@@ -110,7 +116,7 @@ jobs:
             CC=gcc CXX=g++ FC=gfortran \
             FLAGS="-std=gnu99 -O2 -fopenmp -pipe -DINLA_WITH_OPENBLAS" \
             RLIB_INC="-DINLA_WITH_LIBR -I$RHOME/include" \
-            RLIB_LIB="-L$RBIN -lRmath -lR" \
+            RLIB_LIB="-L$RBIN -lRmathfwd -lR" \
             EXTLIBS1="-L$PREFIX/lib -lGMRFLib -ltaucs" \
             EXTLIBS2="-lgsl -lmetis -lopenblas -lmuparser -lz -lgfortran -lcrypto -lltdl" \
             EXTLIBS3="-lm" \
