@@ -79,9 +79,12 @@ static void pmkl_load(void)
 				fprintf(stderr, "\n\t*** pardiso-mkl: cannot load mkl_rt runtime. Exit.\n\n");
 				exit(1);
 			}
+			fprintf(stderr, "PMKL: mkl_rt loaded h=%p\n", h);
 			mkl_pardisoinit_p = (mkl_pardisoinit_fn) pmkl_sym(h, "pardisoinit");
 			mkl_pardiso_p = (mkl_pardiso_fn) pmkl_sym(h, "pardiso");
 			mkl_pardiso_getdiag_p = (mkl_pardiso_getdiag_fn) pmkl_sym(h, "pardiso_getdiag");
+			fprintf(stderr, "PMKL: syms init=%p pardiso=%p getdiag=%p\n",
+				(void*)mkl_pardisoinit_p, (void*)mkl_pardiso_p, (void*)mkl_pardiso_getdiag_p);
 			if (!mkl_pardisoinit_p || !mkl_pardiso_p || !mkl_pardiso_getdiag_p) {
 				fprintf(stderr, "\n\t*** pardiso-mkl: mkl_rt missing pardiso entry points. Exit.\n\n");
 				exit(1);
@@ -169,8 +172,11 @@ void pardisoinit(void *pt, int *mtype, int *solver, int *iparm, double *dparm, i
 {
 	(void) solver;
 	(void) dparm;
+	fprintf(stderr, "PMKL: pardisoinit entry mtype=%d\n", *mtype);
 	pmkl_load();
+	fprintf(stderr, "PMKL: pardisoinit -> setup_iparm\n");
 	pmkl_setup_iparm(iparm, *mtype);
+	fprintf(stderr, "PMKL: pardisoinit setup_iparm done\n");
 	for (int i = 0; i < 64; i++) {
 		((void **) pt)[i] = NULL;
 	}
