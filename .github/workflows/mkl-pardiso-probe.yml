@@ -10,6 +10,8 @@ name: mkl-pardiso-probe
 
 on:
   workflow_dispatch:
+  push:
+    branches: [mkl-pardiso]
 
 jobs:
   probe:
