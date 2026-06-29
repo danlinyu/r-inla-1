@@ -288,9 +288,13 @@ int GMRFLib_pardiso_reorder(GMRFLib_pardiso_store_tp *store, GMRFLib_graph_tp *g
 	int n, mnum1 = 1;
 	GMRFLib_csr_tp *Q = NULL;
 
+	fprintf(stderr, "RDBG: reorder entry\n");
 	GMRFLib_graph_duplicate(&(store->graph), graph);
+	fprintf(stderr, "RDBG: after graph_duplicate\n");
 	GMRFLib_pardiso_setparam(GMRFLib_PARDISO_FLAG_REORDER, store, NULL);
+	fprintf(stderr, "RDBG: after setparam\n");
 	GMRFLib_Q2csr(0, &Q, store->graph, GMRFLib_pardiso_Qfunc_default, (void *) store->graph);
+	fprintf(stderr, "RDBG: after Q2csr Q=%p\n", (void*)Q);
 	assert(Q);
 
 	if (S.csr_check) {
@@ -319,6 +323,7 @@ int GMRFLib_pardiso_reorder(GMRFLib_pardiso_store_tp *store, GMRFLib_graph_tp *g
 		}
 	}
 
+	fprintf(stderr, "RDBG: before pardiso phase11 n=%d\n", n);
 	pardiso(store->pt, &(store->maxfct), &mnum1, &(store->mtype),
 		&(store->pstore[tnum]->phase),
 		&(Q->s->n), Q->a, Q->s->ia1, Q->s->ja1, store->pstore[GMRFLib_PSTORE_TNUM_REF]->perm,
