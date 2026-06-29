@@ -157,8 +157,17 @@ jobs:
         run: |
           set -o pipefail
           export PATH="/ucrt64/bin:/c/R/bin/x64:$PATH"
-          OURINLA="$(cygpath -m "$PWD/inlaprog/inla.exe")"   # forward-slash Windows path; avoids R backslash-escape
-          echo "our engine: $OURINLA"
+          # Wrap our engine in a .bat so we capture the EXACT args + raw stdout/stderr
+          # + exit code (INLA's inla.core.safe otherwise swallows the engine output).
+          EXE_W="$(cygpath -w "$PWD/inlaprog/inla.exe")"
+          LOG_W="$(cygpath -w "$PWD/wrap.log")"
+          printf '@echo off\r\n' > inla-wrap.bat
+          printf 'echo === ARGS: %%* >> "%s"\r\n' "$LOG_W" >> inla-wrap.bat
+          printf '"%s" %%* >> "%s" 2>&1\r\n' "$EXE_W" "$LOG_W" >> inla-wrap.bat
+          printf 'echo === EXIT: %%errorlevel%% >> "%s"\r\n' "$LOG_W" >> inla-wrap.bat
+          OURINLA="$(cygpath -m "$PWD/inla-wrap.bat")"   # forward-slash Windows path; avoids R backslash-escape
+          echo "our engine (via wrapper): $OURINLA"
+          cat inla-wrap.bat
           cat > smoke.R <<'EOF'
           suppressMessages(library(INLA))
           our.call <- commandArgs(trailingOnly=TRUE)[1]
@@ -188,6 +197,9 @@ jobs:
           EOF
           Rscript smoke.R "$OURINLA" 2>&1 | tee smoke.log
           echo "smoke exit: ${PIPESTATUS[0]}"
+          echo ""
+          echo "===== wrap.log (raw engine output + exit code) ====="
+          cat wrap.log 2>/dev/null || echo "(no wrap.log — engine was never invoked)"
 
       - uses: actions/upload-artifact@v4
         if: always()
@@ -196,6 +208,7 @@ jobs:
           path: |
             inlaprog-build.log
             smoke.log
+            wrap.log
 
       - uses: actions/upload-artifact@v4
         if: always()
