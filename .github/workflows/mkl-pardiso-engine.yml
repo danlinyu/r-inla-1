@@ -144,8 +144,11 @@ jobs:
           # TBB threading layer -> MKL-internal parallelism with no clash against
           # GMRFLib's GNU libgomp (TBB is not OpenMP). TBB_DIR holds tbb12.dll.
           export PATH="/ucrt64/bin:$RBIN:$MKL_DLLDIR:$TBB_DIR:$PATH"
+          # TBB layer: MKL uses all cores by default; no MKL_NUM_THREADS knob (that
+          # env is for the OpenMP layer, and the Fortran mkl_set_num_threads symbol
+          # is by-reference -- calling it by value segfaults). TBB composes with
+          # GMRFLib's libgomp via its work-stealing arena.
           export MKL_THREADING_LAYER=TBB
-          export MKL_NUM_THREADS=4
           export MKL_INTERFACE_LAYER=LP64
           OURINLA="$(cygpath -m "$PWD/inlaprog/inla.exe")"
           echo "engine: $OURINLA"
@@ -221,8 +224,9 @@ jobs:
                 MKL_INTERFACE_LAYER=LP64 \
                 Rscript timeit.R "${SMTP:-pardiso}" 2>&1 | grep -E 'RESULT|FATAL|error' || true
           }
-          echo "--- pardiso, TBB, $NPROC threads ---"
-          SMTP=pardiso run_cfg "pardiso-TBB" MKL_THREADING_LAYER=TBB MKL_NUM_THREADS="$NPROC" | tee tbb.txt
+          # TBB layer -> all $NPROC cores by default (no MKL_NUM_THREADS knob).
+          echo "--- pardiso, TBB (all $NPROC cores) ---"
+          SMTP=pardiso run_cfg "pardiso-TBB" MKL_THREADING_LAYER=TBB | tee tbb.txt
           echo "--- pardiso, sequential (1 thread) ---"
           SMTP=pardiso run_cfg "pardiso-SEQ" MKL_THREADING_LAYER=SEQUENTIAL | tee seq.txt
           echo "--- taucs (reference solver, no MKL) ---"

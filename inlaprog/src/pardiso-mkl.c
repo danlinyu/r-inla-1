@@ -43,8 +43,6 @@ typedef void (*mkl_pardisoinit_fn)(void *, int *, int *);
 typedef void (*mkl_pardiso_fn)(void *, int *, int *, int *, int *, int *, void *,
 			       int *, int *, int *, int *, int *, int *, void *, void *, int *);
 typedef void (*mkl_pardiso_getdiag_fn)(const void *, void *, void *, int *, int *);
-typedef void (*mkl_set_num_threads_fn)(int);
-typedef void (*mkl_set_dynamic_fn)(int);
 
 static mkl_pardisoinit_fn     mkl_pardisoinit_p = NULL;
 static mkl_pardiso_fn         mkl_pardiso_p = NULL;
@@ -90,27 +88,16 @@ static void pmkl_load(void)
 			}
 
 			/*
-			 * Thread knob. Under MKL_THREADING_LAYER=TBB, MKL's parallelism is
-			 * governed by mkl_set_num_threads / MKL_NUM_THREADS, NOT by the
-			 * caller's iparm[2] (which this shim ignores -- it builds its own
-			 * iparm from MKL defaults). INLA invokes PARDISO from inside its own
-			 * OpenMP parallel regions; MKL would self-limit to 1 thread there
-			 * unless we pin it. mkl_set_dynamic(0) + mkl_set_num_threads(n) force
-			 * exactly n threads regardless of the OpenMP nesting. Driven by the
-			 * env var MKL_NUM_THREADS so the count stays controllable from CI;
-			 * absent/<=0 leaves MKL on its own default (sequential layer -> 1).
+			 * Threading is selected entirely by the MKL_THREADING_LAYER env var.
+			 * MKL_THREADING_LAYER=TBB gives MKL-internal parallelism (all cores by
+			 * default) with no second OpenMP runtime to clash against GMRFLib's GNU
+			 * libgomp -- TBB's work-stealing arena composes safely even when INLA
+			 * calls PARDISO from inside its own OpenMP regions. We deliberately do
+			 * NOT call mkl_set_num_threads here: the lowercase symbol is MKL's
+			 * Fortran interface (argument by reference), and under the TBB layer
+			 * thread-count control belongs to TBB (global_control), not to this
+			 * OpenMP-era knob. The env var alone is sufficient and proven exact.
 			 */
-			mkl_set_num_threads_fn set_nt = (mkl_set_num_threads_fn) pmkl_sym(h, "mkl_set_num_threads");
-			mkl_set_dynamic_fn     set_dyn = (mkl_set_dynamic_fn) pmkl_sym(h, "mkl_set_dynamic");
-			const char *nt_env = getenv("MKL_NUM_THREADS");
-			int nt = nt_env ? atoi(nt_env) : 0;
-			if (nt > 0 && set_nt) {
-				if (set_dyn) {
-					set_dyn(0);
-				}
-				set_nt(nt);
-			}
-
 			mkl_loaded = 1;
 		}
 	}
