@@ -125,10 +125,20 @@ jobs:
           echo "=== link errors (undefined refs) ===" ; grep -nE 'undefined reference|cannot find -l|undefined symbol' inlaprog-build.log | head -40 || true
 
       - name: Install INLA R package (R interface + official reference engine)
-        shell: pwsh
         run: |
-          Rscript -e "options(timeout=1200); install.packages('INLA', repos=c(getOption('repos'), INLA='https://inla.r-inla-download.org/R/stable'), dep=TRUE, type='binary')"
-          Rscript -e "suppressMessages(library(INLA)); cat('INLA version:', as.character(packageVersion('INLA')), '\n'); cat('default inla.call:', inla.getOption('inla.call'), '\n')"
+          set -e
+          CONTRIB="https://inla.r-inla-download.org/R/stable/bin/windows/contrib/4.5"
+          # Install INLA's CRAN dependencies from the reliable RSPM mirror.
+          Rscript -e 'options(timeout=1200); install.packages(c("sp","fmesher","MatrixModels","rlang","lifecycle","withr","foreach"), repos="https://packagemanager.posit.co/cran/latest")'
+          # R's resolver flakes on the INLA server, so fetch the binary zip directly
+          # (curl reaches it fine) and install from the local file.
+          INLA_VER="$(curl -s "$CONTRIB/PACKAGES" | awk '/^Version:/{print $2; exit}')"
+          echo "INLA stable version for R 4.5: $INLA_VER"
+          curl -fsSL -o INLA.zip "$CONTRIB/INLA_${INLA_VER}.zip"
+          ls -la INLA.zip
+          ZIP="$(cygpath -m "$PWD/INLA.zip")"
+          Rscript -e "install.packages('$ZIP', repos=NULL, type='win.binary')"
+          Rscript -e 'suppressMessages(library(INLA)); cat("INLA version:", as.character(packageVersion("INLA")), "\n"); cat("default inla.call:", inla.getOption("inla.call"), "\n")'
 
       - name: Smoke test — our inla.exe vs official engine on an identical model
         continue-on-error: true
