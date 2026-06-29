@@ -150,7 +150,8 @@ static void pmkl_scratch_drop(void *pt)
 static void pmkl_setup_iparm(int *iparm, int mtype)
 {
 	int dummy = mtype;
-	mkl_pardisoinit_p(NULL, &dummy, iparm);		       /* defaults for this mtype */
+	void *dummy_pt[64] = { 0 };			       /* mkl pardisoinit writes the handle; must not be NULL */
+	mkl_pardisoinit_p(dummy_pt, &dummy, iparm);	       /* defaults for this mtype */
 	iparm[0] = 1;					       /* we set values explicitly below */
 	iparm[1] = 3;					       /* parallel (OpenMP) METIS reordering */
 	iparm[4] = 0;					       /* compute fill-reducing permutation internally */
