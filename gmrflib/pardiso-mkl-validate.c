@@ -14,6 +14,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
+#include <omp.h>
 #include "GMRFLib/GMRFLib.h"
 
 #define TRACE(msg) fprintf(stderr, "TRACE: %s\n", msg)
@@ -69,7 +70,20 @@ int main(void)
 
 	setvbuf(stdout, NULL, _IONBF, 0);		       /* unbuffered: see output up to any crash */
 
-	GMRFLib_openmp = Calloc(1, GMRFLib_openmp_tp);	       /* the engine allocates this at startup */
+	/* replicate the engine's startup init (inla.c) */
+	GMRFLib_numa_init();
+	GMRFLib_openmp = Calloc(1, GMRFLib_openmp_tp);
+	GMRFLib_openmp->max_threads = 2;
+	GMRFLib_openmp->max_threads2 = 2 * (2 + 1);
+	GMRFLib_openmp->blas_num_threads_force = 0;
+	GMRFLib_openmp->max_threads_nested = Calloc(3, int);
+	GMRFLib_openmp->max_threads_nested[0] = GMRFLib_openmp->max_threads;
+	GMRFLib_openmp->max_threads_nested[1] = 1;
+	GMRFLib_openmp->max_threads_nested[2] = 1;
+	GMRFLib_openmp->adaptive = 0;
+	GMRFLib_openmp->schedule = omp_sched_guided;
+	GMRFLib_openmp->chunk_size = 0;
+	GMRFLib_openmp->likelihood_nt = 0;
 	TRACE("implement_strategy");
 	GMRFLib_openmp->strategy = GMRFLib_OPENMP_STRATEGY_PARDISO;
 	GMRFLib_openmp_implement_strategy(GMRFLib_OPENMP_PLACES_OPTIMIZE, NULL, NULL);
