@@ -21,6 +21,17 @@
 extern void dtrsv_(const char *, const char *, const char *, int *, double *, int *, double *, int *,
 		   FORTRAN_CHARLEN_T, FORTRAN_CHARLEN_T, FORTRAN_CHARLEN_T);
 
+/* inlaprog symbols that libGMRFLib references; stubbed since we link only GMRFLib. */
+int inla_ncpu(void)
+{
+	return 1;
+}
+void *inla_stiles_get_setup(void *m)
+{
+	(void) m;
+	return NULL;
+}
+
 static double q_diag(int i)
 {
 	return 5.0 + 0.1 * i;				       /* diagonally dominant -> SPD */
