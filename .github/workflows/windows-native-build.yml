@@ -131,6 +131,10 @@ jobs:
           echo "=== link errors (undefined refs) ===" ; grep -nE 'undefined reference|cannot find -l|undefined symbol' inlaprog-build.log | head -40 || true
 
       - name: Install INLA R package (R interface + official reference engine)
+        # Validation downloads the official INLA binary from an external CDN. Run it
+        # only on manual dispatch so the default push CI (build + bundle) stays
+        # self-contained and green, and we don't hammer the INLA server on every push.
+        if: github.event_name == 'workflow_dispatch'
         continue-on-error: true
         run: |
           set -e
@@ -166,6 +170,7 @@ jobs:
           true
 
       - name: Smoke test — our inla.exe vs official engine on an identical model
+        if: github.event_name == 'workflow_dispatch'
         continue-on-error: true
         run: |
           set -o pipefail
