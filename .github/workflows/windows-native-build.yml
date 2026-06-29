@@ -135,7 +135,7 @@ jobs:
         run: |
           set -o pipefail
           export PATH="/ucrt64/bin:$PATH"
-          OURINLA="$(cygpath -w "$PWD/inlaprog/inla.exe")"
+          OURINLA="$(cygpath -m "$PWD/inlaprog/inla.exe")"   # forward-slash Windows path; avoids R backslash-escape
           echo "our engine: $OURINLA"
           cat > smoke.R <<'EOF'
           suppressMessages(library(INLA))
