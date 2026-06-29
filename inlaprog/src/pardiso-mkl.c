@@ -155,11 +155,8 @@ static void pmkl_setup_iparm(int *iparm, int mtype)
 	int dummy = mtype;
 	void *dummy_pt[64] = { 0 };			       /* mkl pardisoinit writes the handle; must not be NULL */
 	mkl_pardisoinit_p(dummy_pt, &dummy, iparm);	       /* defaults for this mtype */
-	iparm[0] = 1;					       /* we set values explicitly below */
-	iparm[1] = 3;					       /* parallel (OpenMP) METIS reordering */
-	iparm[4] = 0;					       /* compute fill-reducing permutation internally */
-	iparm[7] = 0;					       /* no iterative refinement */
-	iparm[9] = 13;					       /* pivot perturbation 1e-13 (oneMKL default for sym) */
+	/* keep close to oneMKL defaults (proven in the standalone probe); only the two
+	 * settings GMRFLib's data layout and our log-det route require: */
 	iparm[34] = 0;					       /* one-based indexing (GMRFLib uses ia1/ja1) */
 	iparm[55] = 1;					       /* store diagonal so pardiso_getdiag works */
 }
@@ -192,6 +189,7 @@ void pardiso(void *pt, int *maxfct, int *mnum, int *mtype, int *phase, int *n,
 	int caller_phase = *phase;
 	int idum = 0;
 	double ddum = 0.0;
+	int safe_nrhs = 1;				       /* GMRFLib passes nrhs=-1 for analysis; oneMKL wants >=1 */
 
 	/* our own clean oneMKL iparm, derived from the (mtype-correct) defaults */
 	int my_iparm[64];
@@ -200,7 +198,7 @@ void pardiso(void *pt, int *maxfct, int *mnum, int *mtype, int *phase, int *n,
 	if (caller_phase == -1) {
 		/* release */
 		int ph = -1;
-		mkl_pardiso_p(pt, maxfct, mnum, mtype, &ph, n, a, ia, ja, perm, nrhs, my_iparm, msglvl, &ddum, &ddum, error);
+		mkl_pardiso_p(pt, maxfct, mnum, mtype, &ph, n, a, ia, ja, perm, &safe_nrhs, my_iparm, msglvl, &ddum, &ddum, error);
 		pmkl_scratch_drop(pt);
 		return;
 	}
@@ -210,7 +208,7 @@ void pardiso(void *pt, int *maxfct, int *mnum, int *mtype, int *phase, int *n,
 		 * inversion is requested with phase = -22 after a phase-22 factorize.
 		 * The validation harness reports exactly what oneMKL fills in. */
 		int ph = -22;
-		mkl_pardiso_p(pt, maxfct, mnum, mtype, &ph, n, a, ia, ja, perm, nrhs, my_iparm, msglvl, &ddum, &ddum, error);
+		mkl_pardiso_p(pt, maxfct, mnum, mtype, &ph, n, a, ia, ja, perm, &safe_nrhs, my_iparm, msglvl, &ddum, &ddum, error);
 		/* GMRFLib reads back the inverse from `a` (the CSR values array) */
 		iparm[17] = my_iparm[17];
 		return;
@@ -218,14 +216,14 @@ void pardiso(void *pt, int *maxfct, int *mnum, int *mtype, int *phase, int *n,
 
 	if (caller_phase == 11) {
 		int ph = 11;
-		mkl_pardiso_p(pt, maxfct, mnum, mtype, &ph, n, a, ia, ja, perm, nrhs, my_iparm, msglvl, &ddum, &ddum, error);
+		mkl_pardiso_p(pt, maxfct, mnum, mtype, &ph, n, a, ia, ja, perm, &safe_nrhs, my_iparm, msglvl, &ddum, &ddum, error);
 		iparm[17] = my_iparm[17];		       /* nnz(L) -- same index in both libraries */
 		return;
 	}
 
 	if (caller_phase == 22) {
 		int ph = 22;
-		mkl_pardiso_p(pt, maxfct, mnum, mtype, &ph, n, a, ia, ja, perm, nrhs, my_iparm, msglvl, &ddum, &ddum, error);
+		mkl_pardiso_p(pt, maxfct, mnum, mtype, &ph, n, a, ia, ja, perm, &safe_nrhs, my_iparm, msglvl, &ddum, &ddum, error);
 		iparm[17] = my_iparm[17];		       /* nnz(L) */
 		iparm[21] = my_iparm[21];		       /* # positive pivots */
 		iparm[22] = my_iparm[22];		       /* # negative pivots (pos-def check) */
