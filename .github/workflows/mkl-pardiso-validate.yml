@@ -1,0 +1,96 @@
+name: mkl-pardiso-validate
+
+# Phase 2: validate the license-clean oneMKL PARDISO adapter (inlaprog/src/pardiso-mkl.c)
+# against dense LAPACK ground truth, driving it through the real GMRFLib PARDISO path.
+# Builds libGMRFLib.a + the adapter + the validation driver; no inlaprog / no R needed.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [mkl-pardiso]
+
+jobs:
+  validate:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up MSYS2 (UCRT64)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          path-type: inherit
+          install: >-
+            base-devel
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-gcc-fortran
+            mingw-w64-ucrt-x86_64-make
+            mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-openblas
+            mingw-w64-ucrt-x86_64-gsl
+            mingw-w64-ucrt-x86_64-metis
+            mingw-w64-ucrt-x86_64-muparser
+            mingw-w64-ucrt-x86_64-zlib
+            mingw-w64-ucrt-x86_64-openssl
+            mingw-w64-ucrt-x86_64-suitesparse
+            mingw-w64-ucrt-x86_64-libtool
+
+      - name: Install Intel oneMKL (pip wheels)
+        shell: cmd
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install mkl mkl-devel mkl-include
+
+      - name: Locate MKL runtime dir
+        run: |
+          set -e
+          PYPREFIX="$(cygpath -u "$(python -c 'import sys;print(sys.prefix)')")"
+          MKL_DLL="$(find "$PYPREFIX" -iname 'mkl_rt*.dll' | head -1)"
+          echo "MKL_DLLDIR=$(dirname "$MKL_DLL")" >> "$GITHUB_ENV"
+          echo "found $MKL_DLL"
+
+      - name: Build + install GMRFLib
+        run: |
+          set -e
+          PREFIX="$PWD/local"
+          mkdir -p "$PREFIX/lib" "$PREFIX/include" "$PREFIX/bin"
+          make -C gmrflib \
+            PREFIX="$PREFIX" LEXTPREFIX=/ucrt64 \
+            CC=gcc CXX=g++ FC=gfortran \
+            FLAGS="-O2 -fopenmp -pthread -DINLA_WITH_OPENBLAS"
+          make -C gmrflib PREFIX="$PREFIX" LEXTPREFIX=/ucrt64 install
+          cp gmrflib/taucs/libtaucs.a "$PREFIX/lib/" 2>/dev/null || true
+          echo "PREFIX=$PREFIX" >> "$GITHUB_ENV"
+
+      - name: Compile the oneMKL adapter
+        run: |
+          set -e
+          gcc -O2 -fopenmp -DINLA_WITH_PARDISO_MKL \
+              -c inlaprog/src/pardiso-mkl.c -o pardiso-mkl.o
+          echo "adapter compiled"
+
+      - name: Compile + link the validation driver
+        run: |
+          set -e
+          gcc -O2 -fopenmp -I"$PREFIX/include" \
+              -c gmrflib/pardiso-mkl-validate.c -o validate.o
+          gcc -O2 -fopenmp -o validate.exe \
+              validate.o pardiso-mkl.o \
+              -L"$PREFIX/lib" -lGMRFLib -ltaucs \
+              -lgsl -lmetis -lopenblas -lgfortran -lquadmath -lm
+          echo "linked. mkl deps (none expected at link time):"
+          ldd validate.exe | grep -i mkl || echo "  (none -- adapter loads mkl_rt at runtime)"
+
+      - name: Run validation (sequential MKL)
+        run: |
+          set -e
+          cp validate.exe "$MKL_DLLDIR/"
+          cd "$MKL_DLLDIR"
+          export PATH="$PATH:/ucrt64/bin"
+          export MKL_THREADING_LAYER=SEQUENTIAL
+          export MKL_INTERFACE_LAYER=LP64
+          ./validate.exe
