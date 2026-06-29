@@ -148,16 +148,15 @@ jobs:
           Rscript -e "install.packages('$ZIP', repos=NULL, type='win.binary')"
           Rscript -e 'suppressMessages(library(INLA)); cat("INLA version:", as.character(packageVersion("INLA")), "\n"); cat("default inla.call:", inla.getOption("inla.call"), "\n")'
 
-      - name: Diagnose our inla.exe (DLL resolution + direct run)
+      - name: Diagnose our inla.exe (DLL resolution)
         continue-on-error: true
         run: |
           export PATH="/ucrt64/bin:/c/R/bin/x64:$PATH"
           echo "=== DLL dependencies (ldd) ==="
           ldd inlaprog/inla.exe 2>&1 | sort || true
           echo "=== unresolved DLLs? ==="
-          ldd inlaprog/inla.exe 2>&1 | grep -i 'not found' || echo "all DLLs resolved"
-          echo "=== direct run: inla.exe with no args (does the engine start?) ==="
-          ./inlaprog/inla.exe 2>&1 | head -25; echo "direct-run exit: $?"
+          if ldd inlaprog/inla.exe 2>&1 | grep -i 'not found'; then echo "WARNING: unresolved DLLs above"; else echo "all DLLs resolved"; fi
+          true
 
       - name: Smoke test — our inla.exe vs official engine on an identical model
         continue-on-error: true
