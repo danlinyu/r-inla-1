@@ -87,12 +87,19 @@ jobs:
           echo "linked. mkl deps (none expected at link time):"
           ldd validate.exe | grep -i mkl || echo "  (none -- adapter loads mkl_rt at runtime)"
 
-      - name: Run validation (sequential MKL)
+      - name: Run validation (TBB-threaded MKL)
         run: |
           set -e
+          # tbb12.dll ships in the python prefix alongside mkl_rt; make sure the
+          # MKL TBB threading layer (mkl_tbb_thread.3.dll -> tbb12.dll) can load it.
+          PYPREFIX="$(cygpath -u "$(python -c 'import sys;print(sys.prefix)')")"
+          TBB_DLL="$(find "$PYPREFIX" -iname 'tbb12*.dll' | head -1)"
+          echo "tbb12 at: $TBB_DLL"
+          [ -n "$TBB_DLL" ] && cp -v "$TBB_DLL" "$MKL_DLLDIR/" || true
           cp validate.exe "$MKL_DLLDIR/"
           cd "$MKL_DLLDIR"
           export PATH="$PATH:/ucrt64/bin"
-          export MKL_THREADING_LAYER=SEQUENTIAL
+          export MKL_THREADING_LAYER=TBB
+          export MKL_NUM_THREADS=4
           export MKL_INTERFACE_LAYER=LP64
           ./validate.exe

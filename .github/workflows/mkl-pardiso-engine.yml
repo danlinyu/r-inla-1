@@ -60,6 +60,12 @@ jobs:
           echo "MKL_DLLDIR=$MKL_DLLDIR" >> "$GITHUB_ENV"
           echo "MKL_DLLDIR_W=$(cygpath -w "$MKL_DLLDIR")" >> "$GITHUB_ENV"
           echo "found MKL at $MKL_DLLDIR"
+          # The TBB threading layer (mkl_tbb_thread.3.dll) needs tbb12.dll at run
+          # time. It ships in the same python prefix (its own Library/bin); export
+          # its dir so we can put it on PATH for the TBB-threaded runs.
+          TBB_DIR="$(dirname "$(find "$PYPREFIX" -iname 'tbb12*.dll' | head -1)")"
+          echo "TBB_DIR=$TBB_DIR" >> "$GITHUB_ENV"
+          echo "found tbb12 dir: $TBB_DIR"
 
       - name: Build + install GMRFLib (with PARDISO path)
         run: |
@@ -132,18 +138,21 @@ jobs:
           ZIP="$(cygpath -m "$PWD/INLA.zip")"
           Rscript -e "install.packages('$ZIP', repos=NULL, type='win.binary')"
 
-      - name: Validate pardiso(MKL) == taucs on a real INLA model
+      - name: Validate pardiso(MKL,TBB) == taucs on a real INLA model
         run: |
           set -o pipefail
-          export PATH="/ucrt64/bin:$RBIN:$MKL_DLLDIR:$PATH"
-          export MKL_THREADING_LAYER=SEQUENTIAL
+          # TBB threading layer -> MKL-internal parallelism with no clash against
+          # GMRFLib's GNU libgomp (TBB is not OpenMP). TBB_DIR holds tbb12.dll.
+          export PATH="/ucrt64/bin:$RBIN:$MKL_DLLDIR:$TBB_DIR:$PATH"
+          export MKL_THREADING_LAYER=TBB
+          export MKL_NUM_THREADS=4
           export MKL_INTERFACE_LAYER=LP64
           OURINLA="$(cygpath -m "$PWD/inlaprog/inla.exe")"
           echo "engine: $OURINLA"
           cat > engine.R <<EOF
           suppressMessages({library(INLA); library(Matrix)})
           inla.setOption(inla.call="$OURINLA")
-          inla.setOption(num.threads="1:1")
+          inla.setOption(num.threads="2:1")
           set.seed(1)
           n <- 50; x <- rnorm(n); idx <- 1:n
           y <- 1 + 0.5*x + rnorm(n, sd=0.3) + cumsum(rnorm(n, sd=0.1))
@@ -160,12 +169,77 @@ jobs:
           rf <- max(abs(rp\$summary.random\$idx[,"mean"] - rt\$summary.random\$idx[,"mean"]))
           rs <- max(abs(rp\$summary.random\$idx[,"sd"]   - rt\$summary.random\$idx[,"sd"]))
           ml <- abs(rp\$mlik[1] - rt\$mlik[1])
-          cat(sprintf("fixed mean diff   = %.3e\n", fx))
-          cat(sprintf("fixed sd   diff   = %.3e\n", sd))
-          cat(sprintf("random mean diff  = %.3e\n", rf))
-          cat(sprintf("random sd   diff  = %.3e  (<- exercises Qinv)\n", rs))
-          cat(sprintf("mlik diff         = %.3e\n", ml))
-          stopifnot(fx < 1e-6, sd < 1e-6, rf < 1e-6, rs < 1e-6, ml < 1e-4)
-          cat("ENGINE VALIDATE OK: pardiso(MKL) matches taucs\n")
+          # Hyperparameter (precision) posteriors are heavy-tailed; under multi-
+          # threaded MKL the BLAS reduction order changes and inflates the MEAN.
+          # Compare on the MEDIAN (0.5quant), which is the stable metric.
+          hy <- max(abs(rp\$summary.hyperpar[,"0.5quant"] - rt\$summary.hyperpar[,"0.5quant"]) /
+                    pmax(abs(rt\$summary.hyperpar[,"0.5quant"]), 1e-8))
+          cat(sprintf("fixed mean diff       = %.3e\n", fx))
+          cat(sprintf("fixed sd   diff       = %.3e\n", sd))
+          cat(sprintf("random mean diff      = %.3e\n", rf))
+          cat(sprintf("random sd   diff      = %.3e  (<- exercises Qinv)\n", rs))
+          cat(sprintf("mlik diff             = %.3e\n", ml))
+          cat(sprintf("hyperpar median reldif= %.3e\n", hy))
+          stopifnot(fx < 1e-6, sd < 1e-6, rf < 1e-6, rs < 1e-6, ml < 1e-4, hy < 1e-4)
+          cat("ENGINE VALIDATE OK: pardiso(MKL,TBB) matches taucs\n")
           EOF
           Rscript engine.R
+
+      - name: Measure speedup (pardiso-TBB vs pardiso-sequential vs taucs)
+        run: |
+          set -o pipefail
+          NPROC="$(nproc)"
+          echo "runner has $NPROC logical CPUs"
+          OURINLA="$(cygpath -m "$PWD/inlaprog/inla.exe")"
+          # One larger model (n=3000 rw1 + fixed effect) exercises factor / solve /
+          # Qinv on a real latent dimension. INLA itself runs single-threaded
+          # (num.threads=1:1, int.strategy=eb -> one config) so the ONLY parallelism
+          # is inside MKL's BLAS/LAPACK -- this isolates the MKL threading speedup.
+          cat > timeit.R <<EOF
+          suppressMessages({library(INLA)})
+          args <- commandArgs(trailingOnly=TRUE)
+          smtp <- args[1]
+          inla.setOption(inla.call="$OURINLA")
+          inla.setOption(num.threads="1:1")
+          inla.setOption(smtp=smtp)
+          set.seed(7)
+          n <- 3000; x <- rnorm(n); idx <- 1:n
+          y <- 1 + 0.5*x + rnorm(n, sd=0.3) + cumsum(rnorm(n, sd=0.05))
+          d <- data.frame(y=y, x=x, idx=idx)
+          fit <- function() inla(y ~ x + f(idx, model="rw1"), data=d,
+                                 control.compute=list(config=TRUE),
+                                 control.inla=list(int.strategy="eb"))
+          invisible(fit())                       # warm-up (cache, page-in)
+          ts <- replicate(3, system.time(fit())[["elapsed"]])
+          cat(sprintf("RESULT smtp=%s elapsed_min=%.3f elapsed_median=%.3f\n",
+                      smtp, min(ts), median(ts)))
+          EOF
+          run_cfg () {  # $1=label  $2..=env assignments
+            local label="$1"; shift
+            echo "=== $label ==="
+            env "$@" PATH="/ucrt64/bin:$RBIN:$MKL_DLLDIR:$TBB_DIR:$PATH" \
+                MKL_INTERFACE_LAYER=LP64 \
+                Rscript timeit.R "${SMTP:-pardiso}" 2>&1 | grep -E 'RESULT|FATAL|error' || true
+          }
+          echo "--- pardiso, TBB, $NPROC threads ---"
+          SMTP=pardiso run_cfg "pardiso-TBB" MKL_THREADING_LAYER=TBB MKL_NUM_THREADS="$NPROC" | tee tbb.txt
+          echo "--- pardiso, sequential (1 thread) ---"
+          SMTP=pardiso run_cfg "pardiso-SEQ" MKL_THREADING_LAYER=SEQUENTIAL | tee seq.txt
+          echo "--- taucs (reference solver, no MKL) ---"
+          SMTP=taucs   run_cfg "taucs"        MKL_THREADING_LAYER=SEQUENTIAL | tee taucs.txt
+          # Report the speedup on the median elapsed time.
+          awk '
+            /RESULT/ {
+              for (i=1;i<=NF;i++) if ($i ~ /elapsed_median=/) { split($i,a,"="); m=a[2] }
+              if ($0 ~ /smtp=pardiso/ && tbb=="") tbb=m;       # first pardiso line = TBB
+              else if ($0 ~ /smtp=pardiso/) seq=m;             # second = SEQ
+              else if ($0 ~ /smtp=taucs/) tau=m;
+            }
+            END {
+              printf "\n==== SPEEDUP (median elapsed, seconds) ====\n";
+              printf "pardiso-TBB(%s thr) = %s\n", NPROC, tbb;
+              printf "pardiso-SEQ(1 thr)  = %s\n", seq;
+              printf "taucs               = %s\n", tau;
+              if (tbb>0) printf "MKL TBB speedup vs sequential = %.2fx\n", seq/tbb;
+              if (tbb>0) printf "pardiso-TBB vs taucs          = %.2fx\n", tau/tbb;
+            }' NPROC="$NPROC" tbb.txt seq.txt taucs.txt
