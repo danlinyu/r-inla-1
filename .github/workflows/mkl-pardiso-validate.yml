@@ -58,10 +58,12 @@ jobs:
           set -e
           PREFIX="$PWD/local"
           mkdir -p "$PREFIX/lib" "$PREFIX/include" "$PREFIX/bin"
+          # -DINLA_WITH_PARDISO is REQUIRED: it makes GMRFLib build the 1-based
+          # ia1/ja1 CSR arrays the PARDISO path hands to pardiso() (NULL otherwise).
           make -C gmrflib \
             PREFIX="$PREFIX" LEXTPREFIX=/ucrt64 \
             CC=gcc CXX=g++ FC=gfortran \
-            FLAGS="-O2 -fopenmp -pthread -DINLA_WITH_OPENBLAS"
+            FLAGS="-O2 -fopenmp -pthread -DINLA_WITH_OPENBLAS -DINLA_WITH_PARDISO"
           make -C gmrflib PREFIX="$PREFIX" LEXTPREFIX=/ucrt64 install
           cp gmrflib/taucs/libtaucs.a "$PREFIX/lib/" 2>/dev/null || true
           echo "PREFIX=$PREFIX" >> "$GITHUB_ENV"
