@@ -16,6 +16,8 @@
 #include <math.h>
 #include "GMRFLib/GMRFLib.h"
 
+#define TRACE(msg) fprintf(stderr, "TRACE: %s\n", msg)
+
 /* dpotrf_/dpotrs_/dpotri_ are declared by GMRFLib's lapack-interface.h (with the
  * trailing hidden Fortran string-length arg). Only dtrsv_ needs declaring here. */
 extern void dtrsv_(const char *, const char *, const char *, int *, double *, int *, double *, int *,
@@ -68,11 +70,13 @@ int main(void)
 	setvbuf(stdout, NULL, _IONBF, 0);		       /* unbuffered: see output up to any crash */
 
 	GMRFLib_openmp = Calloc(1, GMRFLib_openmp_tp);	       /* the engine allocates this at startup */
+	TRACE("implement_strategy");
 	GMRFLib_openmp->strategy = GMRFLib_OPENMP_STRATEGY_PARDISO;
 	GMRFLib_openmp_implement_strategy(GMRFLib_OPENMP_PLACES_OPTIMIZE, NULL, NULL);
 	GMRFLib_smtp = GMRFLib_SMTP_PARDISO;
 
 	GMRFLib_graph_tp *g = NULL;
+	TRACE("graph_mk_linear");
 	GMRFLib_graph_mk_linear(&g, n, bw, 0);
 
 	/* dense Q (column-major) for the reference */
@@ -116,11 +120,16 @@ int main(void)
 
 	/* ---- GMRFLib / oneMKL path ---- */
 	GMRFLib_pardiso_store_tp *store = NULL;
+	TRACE("pardiso_init");
 	GMRFLib_pardiso_init(&store);
+	TRACE("pardiso_reorder");
 	GMRFLib_pardiso_reorder(store, g);
+	TRACE("pardiso_build");
 	GMRFLib_pardiso_build(0, store, g, Qfunc, NULL);
+	TRACE("pardiso_chol");
 	GMRFLib_pardiso_chol(store);
 
+	TRACE("logdet");
 	double mkl_logdet = GMRFLib_pardiso_logdet(store);
 	printf("[logdet]    mkl=%.10f  ref=%.10f  diff=%.3e\n", mkl_logdet, ref_logdet, fabs(mkl_logdet - ref_logdet));
 
@@ -131,6 +140,7 @@ int main(void)
 		x[i] = b[i];
 		xref[i] = b[i];
 	}
+	TRACE("solve_LLT");
 	GMRFLib_pardiso_solve_LLT(store, x, x, 1);
 	dpotrs_("L", &n, &one, L, &n, xref, &n, &info, 1);
 	printf("[solve_LLT] max|x - Q^{-1}b| = %.3e\n", maxabs_diff(x, xref, n));
@@ -142,6 +152,7 @@ int main(void)
 		yL[i] = b[i];
 		yLref[i] = b[i];
 	}
+	TRACE("solve_L");
 	GMRFLib_pardiso_solve_L(store, yL, yL, 1);
 	dtrsv_("L", "N", "N", &n, L, &n, yLref, &one, 1, 1, 1);
 	printf("[solve_L]   max|y - L^{-1}b|   = %.3e\n", maxabs_diff(yL, yLref, n));
@@ -153,11 +164,13 @@ int main(void)
 		yT[i] = b[i];
 		yTref[i] = b[i];
 	}
+	TRACE("solve_LT");
 	GMRFLib_pardiso_solve_LT(store, yT, yT, 1);
 	dtrsv_("L", "T", "N", &n, L, &n, yTref, &one, 1, 1, 1);
 	printf("[solve_LT]  max|y - L^{-T}b|   = %.3e\n", maxabs_diff(yT, yTref, n));
 
 	/* selected inverse */
+	TRACE("Qinv");
 	GMRFLib_pardiso_Qinv(store);
 	GMRFLib_csr_tp *Qinv = store->pstore[GMRFLib_PSTORE_TNUM_REF]->Qinv;
 	double diag_err = 0.0, off_err = 0.0;
