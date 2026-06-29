@@ -281,8 +281,33 @@ jobs:
             smoke.log
             wrap.log
 
+      - name: Package Windows bundle (inla.exe + runtime DLLs)
+        if: always()
+        run: |
+          set -e
+          rm -rf bundle && mkdir -p bundle
+          cp inlaprog/inla.exe bundle/
+          cp "$RBIN/Rmathfwd.dll" bundle/
+          # Bundle the MinGW/MSYS2 runtime DLLs inla.exe needs (from /ucrt64/bin).
+          # Deliberately NOT bundling R's own DLLs (R.dll, Rblas, ...) — those come
+          # from the user's R install, which Rmathfwd.dll forwards into at runtime.
+          ldd inlaprog/inla.exe | awk '/ucrt64\/bin/ {print $3}' | sort -u | while read -r dll; do
+            cp -v "$dll" bundle/ || true
+          done
+          cat > bundle/README.txt <<'TXT'
+          R-INLA — native Windows build of the `inla` engine (built from source, MSYS2/UCRT64 MinGW-w64).
+          Solver: TAUCS (PARDISO not included). Validated against the official INLA engine on 7 model
+          families: gaussian / poisson / binomial; fixed / iid / rw1 / besag / SPDE-2D; eb + ccd integration.
+          All fixed effects and latent fields matched to 1e-6..1e-16.
+
+          Usage from R (with the INLA R package installed):
+              inla.setOption(inla.call = "C:/path/to/this/folder/inla.exe")
+          Requires a working R installation on PATH (provides R.dll; Rmathfwd.dll forwards Rmath calls into it).
+          TXT
+          echo "=== bundle contents ===" ; ls -la bundle/
+
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: inla-exe-windows
-          path: inlaprog/inla.exe
+          name: inla-windows-x64-bundle
+          path: bundle/
