@@ -1,0 +1,171 @@
+name: mkl-pardiso-engine
+
+# Phase 2b: build the FULL inla.exe with the license-clean oneMKL PARDISO adapter
+# active, then validate end-to-end by running the SAME INLA model through our engine
+# twice -- smtp="pardiso" (-> oneMKL) and smtp="taucs" -- and comparing. The TAUCS
+# path is already validated against the official engine, so pardiso==taucs here means
+# the MKL integration is correct. No external INLA reference download on the build path.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [mkl-pardiso]
+
+jobs:
+  engine:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up R (Windows)
+        uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: '4.5'
+
+      - name: Set up MSYS2 (UCRT64)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          path-type: inherit
+          install: >-
+            base-devel
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-gcc-fortran
+            mingw-w64-ucrt-x86_64-make
+            mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-openblas
+            mingw-w64-ucrt-x86_64-gsl
+            mingw-w64-ucrt-x86_64-metis
+            mingw-w64-ucrt-x86_64-muparser
+            mingw-w64-ucrt-x86_64-zlib
+            mingw-w64-ucrt-x86_64-openssl
+            mingw-w64-ucrt-x86_64-suitesparse
+            mingw-w64-ucrt-x86_64-libtool
+
+      - name: Install Intel oneMKL (pip wheels)
+        shell: cmd
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install mkl mkl-devel mkl-include
+
+      - name: Locate MKL runtime dir
+        run: |
+          set -e
+          PYPREFIX="$(cygpath -u "$(python -c 'import sys;print(sys.prefix)')")"
+          MKL_DLLDIR="$(dirname "$(find "$PYPREFIX" -iname 'mkl_rt*.dll' | head -1)")"
+          echo "MKL_DLLDIR=$MKL_DLLDIR" >> "$GITHUB_ENV"
+          echo "MKL_DLLDIR_W=$(cygpath -w "$MKL_DLLDIR")" >> "$GITHUB_ENV"
+          echo "found MKL at $MKL_DLLDIR"
+
+      - name: Build + install GMRFLib (with PARDISO path)
+        run: |
+          set -e
+          PREFIX="$PWD/local"
+          mkdir -p "$PREFIX/lib" "$PREFIX/include" "$PREFIX/bin"
+          make -C gmrflib \
+            PREFIX="$PREFIX" LEXTPREFIX=/ucrt64 \
+            CC=gcc CXX=g++ FC=gfortran \
+            FLAGS="-O2 -fopenmp -pthread -DINLA_WITH_OPENBLAS -DINLA_WITH_PARDISO"
+          make -C gmrflib PREFIX="$PREFIX" LEXTPREFIX=/ucrt64 install
+          cp -v gmrflib/taucs/libtaucs.a "$PREFIX/lib/" || true
+          echo "PREFIX=$PREFIX" >> "$GITHUB_ENV"
+
+      - name: Prepare R.dll import lib + Rmath forwarder DLL
+        run: |
+          set -e
+          RHOME="$(cygpath -u "$(Rscript -e 'cat(normalizePath(R.home()))' | tr -d '\r')")"
+          RBIN="$RHOME/bin/x64"; [ -d "$RBIN" ] || RBIN="$RHOME/bin"
+          cd "$RBIN"
+          gendef R.dll >/dev/null 2>&1
+          dlltool -d R.def -l libR.dll.a
+          echo "LIBRARY Rmathfwd.dll" > Rmathfwd.def
+          echo "EXPORTS" >> Rmathfwd.def
+          grep -oE 'Rf_[A-Za-z0-9_]+' R.def | sort -u > rf-exports.txt
+          grep -oE '\b(d|p|q|r)(norm|unif|gamma|beta|binom|pois|t|f|chisq|cauchy|exp|geom|hyper|lnorm|logis|nbinom|weibull|wilcox|signrank|nbeta|nchisq|nt|nf|nbinom_mu)[0-9]*\b|\b(gammafn|lgammafn|digamma|trigamma|tetragamma|pentagamma|beta|lbeta|choose|lchoose|bessel_i|bessel_j|bessel_k|bessel_y|psigamma|sign|fsign|fround|fprec|ftrunc|log1p|expm1|bessel_i_ex|bessel_k_ex)\b' "$RHOME/include/Rmath.h" | sort -u > rmath-names.txt
+          while read fn; do
+            if grep -qx "Rf_$fn" rf-exports.txt; then echo "$fn = R.Rf_$fn" >> Rmathfwd.def; fi
+          done < rmath-names.txt
+          printf 'int __rmathfwd_dummy;\n' > rmathfwd_dummy.c
+          gcc -c rmathfwd_dummy.c -o rmathfwd_dummy.o
+          gcc -shared -o Rmathfwd.dll rmathfwd_dummy.o Rmathfwd.def -Wl,--out-implib,libRmathfwd.dll.a
+          echo "RHOME=$RHOME" >> "$GITHUB_ENV"
+          echo "RBIN=$RBIN" >> "$GITHUB_ENV"
+
+      - name: Generate cgeneric headers (empty tables)
+        run: |
+          cd external-packages
+          bash ./update-cgeneric
+
+      - name: Build inla.exe with the oneMKL PARDISO adapter
+        run: |
+          set -o pipefail
+          make -C inlaprog \
+            PREFIX="$PREFIX" LEXTPREFIX=/ucrt64 \
+            CC=gcc CXX=g++ FC=gfortran \
+            FLAGS="-std=gnu99 -O2 -fopenmp -pipe -DINLA_WITH_OPENBLAS -DINLA_WITH_PARDISO -DINLA_WITH_PARDISO_MKL" \
+            RLIB_INC="-DINLA_WITH_LIBR -I$RHOME/include" \
+            RLIB_LIB="-L$RBIN -lRmathfwd -lR" \
+            EXTLIBS1="-L$PREFIX/lib -lGMRFLib -ltaucs" \
+            EXTLIBS2="-lgsl -lmetis -lopenblas -lmuparser -lz -lgfortran -lcrypto -lltdl" \
+            EXTLIBS3="-lm" \
+            2>&1 | tee inlaprog-build.log
+          echo "make exit: ${PIPESTATUS[0]}"
+          ls -la inlaprog/inla.exe
+
+      - name: Install INLA R package (interface only; engine is OURS)
+        continue-on-error: true
+        run: |
+          set -e
+          CONTRIB="https://inla.r-inla-download.org/R/stable/bin/windows/contrib/4.5"
+          Rscript -e 'options(timeout=1200); install.packages(c("sp","fmesher","MatrixModels","rlang","lifecycle","withr","foreach"), repos="https://packagemanager.posit.co/cran/latest")'
+          RETRY="--retry 8 --retry-delay 6 --retry-all-errors --connect-timeout 30 --http1.1 -A Mozilla/5.0"
+          INLA_VER="$(curl -s $RETRY "$CONTRIB/PACKAGES" | awk '/^Version:/{print $2; exit}')"
+          [ -z "$INLA_VER" ] && INLA_VER="25.06.07"
+          for a in 1 2 3 4 5; do
+            curl -fSL $RETRY -o INLA.zip "$CONTRIB/INLA_${INLA_VER}.zip" && break
+            sleep 20
+          done
+          ZIP="$(cygpath -m "$PWD/INLA.zip")"
+          Rscript -e "install.packages('$ZIP', repos=NULL, type='win.binary')"
+
+      - name: Validate pardiso(MKL) == taucs on a real INLA model
+        run: |
+          set -o pipefail
+          export PATH="/ucrt64/bin:$RBIN:$MKL_DLLDIR:$PATH"
+          export MKL_THREADING_LAYER=SEQUENTIAL
+          export MKL_INTERFACE_LAYER=LP64
+          OURINLA="$(cygpath -m "$PWD/inlaprog/inla.exe")"
+          echo "engine: $OURINLA"
+          cat > engine.R <<EOF
+          suppressMessages({library(INLA); library(Matrix)})
+          inla.setOption(inla.call="$OURINLA")
+          inla.setOption(num.threads="1:1")
+          set.seed(1)
+          n <- 50; x <- rnorm(n); idx <- 1:n
+          y <- 1 + 0.5*x + rnorm(n, sd=0.3) + cumsum(rnorm(n, sd=0.1))
+          d <- data.frame(y=y, x=x, idx=idx)
+          run <- function(smtp) {
+            inla.setOption(smtp=smtp)
+            inla(y ~ x + f(idx, model="rw1"), data=d,
+                 control.compute=list(config=TRUE),
+                 control.inla=list(int.strategy="eb"))
+          }
+          rp <- run("pardiso"); rt <- run("taucs")
+          fx <- max(abs(rp\$summary.fixed[,"mean"] - rt\$summary.fixed[,"mean"]))
+          sd <- max(abs(rp\$summary.fixed[,"sd"]   - rt\$summary.fixed[,"sd"]))
+          rf <- max(abs(rp\$summary.random\$idx[,"mean"] - rt\$summary.random\$idx[,"mean"]))
+          rs <- max(abs(rp\$summary.random\$idx[,"sd"]   - rt\$summary.random\$idx[,"sd"]))
+          ml <- abs(rp\$mlik[1] - rt\$mlik[1])
+          cat(sprintf("fixed mean diff   = %.3e\n", fx))
+          cat(sprintf("fixed sd   diff   = %.3e\n", sd))
+          cat(sprintf("random mean diff  = %.3e\n", rf))
+          cat(sprintf("random sd   diff  = %.3e  (<- exercises Qinv)\n", rs))
+          cat(sprintf("mlik diff         = %.3e\n", ml))
+          stopifnot(fx < 1e-6, sd < 1e-6, rf < 1e-6, rs < 1e-6, ml < 1e-4)
+          cat("ENGINE VALIDATE OK: pardiso(MKL) matches taucs\n")
+          EOF
+          Rscript engine.R
