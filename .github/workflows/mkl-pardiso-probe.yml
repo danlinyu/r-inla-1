@@ -121,7 +121,7 @@ jobs:
               /* log-determinant via the diagonal D of the LDL^T factor */
               double df[3] = {0,0,0}, da[3] = {0,0,0};
               error = 0;
-              pardiso_getdiag((const void *)pt, df, da, &mnum, &error);
+              pardiso_getdiag(pt, df, da, &mnum, &error);
               printf("getdiag error=%d  D=[%g %g %g]\n", (int)error, df[0], df[1], df[2]);
               if (!error) {
                   double logdet = 0.0;
@@ -153,6 +153,11 @@ jobs:
           EOF
           echo "wrote probe.c"
 
+      - name: Inventory MKL runtime DLLs (learn threading options)
+        run: |
+          echo "--- threading / core / openmp DLLs shipped by the wheels ---"
+          ls -1 "$MKL_DLLDIR" | grep -iE 'mkl_(core|def|rt|sequential|intel_thread|gnu_thread|tbb_thread)|iomp|libgomp|libomp' || true
+
       - name: Compile the probe (MinGW gcc -> mkl_rt)
         run: |
           set -e
@@ -162,14 +167,16 @@ jobs:
           echo "compiled. dependencies:"
           ldd probe.exe | grep -i mkl || true
 
-      - name: Run the probe (GNU OpenMP threading layer)
+      - name: Run the probe (sequential MKL — clean numerics first)
         run: |
           set -e
-          cd "$RUNNER_TEMP"
-          # put mkl_rt + the python/Library bin on PATH so the loader finds the DLLs
-          export PATH="$MKL_DLLDIR:$IMPLIB_DIR:$PATH"
-          # the lynchpin for MKL <-> GNU libgomp coexistence:
-          export MKL_THREADING_LAYER=GNU
+          # Run from MKL_DLLDIR so the Windows loader finds mkl_rt's sibling
+          # implementation DLLs (mkl_core, mkl_sequential, ...) next to the exe.
+          # SEQUENTIAL avoids any MKL<->OpenMP-runtime question for this pass.
+          cp "$RUNNER_TEMP/probe.exe" "$MKL_DLLDIR/"
+          cd "$MKL_DLLDIR"
+          # make ucrt64 runtime (libgomp etc.) Windows-loadable too
+          export PATH="$PATH:/ucrt64/bin"
+          export MKL_THREADING_LAYER=SEQUENTIAL
           export MKL_INTERFACE_LAYER=LP64
-          export OMP_NUM_THREADS=2
           ./probe.exe
