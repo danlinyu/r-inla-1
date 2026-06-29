@@ -92,6 +92,8 @@ int main(void)
 	GMRFLib_graph_tp *g = NULL;
 	TRACE("graph_mk_linear");
 	GMRFLib_graph_mk_linear(&g, n, bw, 0);
+	Free(g->sha);					       /* skip the global graph_store cache in this standalone driver */
+	g->sha = NULL;
 
 	/* dense Q (column-major) for the reference */
 	double *Q = Calloc(n * n, double);
