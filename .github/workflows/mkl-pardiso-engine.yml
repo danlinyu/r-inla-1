@@ -326,3 +326,74 @@ jobs:
               if (tbb>0) printf "MKL TBB speedup vs sequential = %.2fx\n", seq/tbb;
               if (tbb>0) printf "pardiso-TBB vs taucs          = %.2fx\n", tau/tbb;
             }' NPROC="$NPROC" tbb2.txt seq2.txt taucs2.txt
+
+      - name: Measure speedup at SCALE (large 2D GMRF, n>10k)
+        if: always()
+        run: |
+          set -o pipefail
+          NPROC="$(nproc)"
+          echo "runner has $NPROC logical CPUs"
+          OURINLA="$(cygpath -m "$PWD/inlaprog/inla.exe")"
+          # SCALE PROBE: a 110x110 lattice besag (n=12100, bandwidth ~110) -- a large
+          # 2D GMRF in the SAME sparsity class as a fine SPDE mesh, but with no
+          # fmesher/stack setup risk. At this size the factor has substantial dense
+          # supernodal work (the one place MKL threading could help) AND the O(n)-solve
+          # Qinv does ~12100 solves (where taucs's Takahashi should pull further ahead).
+          # This confirms whether the small-model verdict holds / worsens at scale.
+          cat > timeit3.R <<EOF
+          suppressMessages({library(INLA); library(Matrix)})
+          args <- commandArgs(trailingOnly=TRUE)
+          smtp <- args[1]
+          inla.setOption(inla.call="$OURINLA")
+          inla.setOption(num.threads="1:1")
+          inla.setOption(smtp=smtp)
+          set.seed(7)
+          gs <- 110L; n <- gs*gs                 # 12100 nodes, bandwidth ~110
+          g <- expand.grid(i=1:gs, j=1:gs)
+          nd <- function(i,j) (j-1L)*gs + i
+          fr <- integer(0); to <- integer(0)
+          sel <- g\$i < gs
+          fr <- c(fr, nd(g\$i[sel], g\$j[sel])); to <- c(to, nd(g\$i[sel]+1L, g\$j[sel]))
+          sel <- g\$j < gs
+          fr <- c(fr, nd(g\$i[sel], g\$j[sel])); to <- c(to, nd(g\$i[sel], g\$j[sel]+1L))
+          W <- sparseMatrix(i=c(fr,to), j=c(to,fr), x=1, dims=c(n,n))
+          gr <- inla.read.graph(W)
+          field <- as.vector(scale(g\$i)) + as.vector(scale(g\$j))
+          y <- field + rnorm(n, sd=0.5)
+          d <- data.frame(y=y, s=1:n)
+          fit <- function() inla(y ~ 1 + f(s, model="besag", graph=gr), data=d,
+                                 control.compute=list(config=TRUE),
+                                 control.inla=list(int.strategy="eb"))
+          invisible(fit())                       # warm-up
+          ts <- replicate(2, system.time(fit())[["elapsed"]])   # 2 reps (large)
+          cat(sprintf("RESULT smtp=%s n=%d elapsed_min=%.3f elapsed_median=%.3f\n",
+                      smtp, n, min(ts), median(ts)))
+          EOF
+          run_cfg () {
+            local label="$1"; shift
+            echo "=== $label ==="
+            env "$@" PATH="/ucrt64/bin:$RBIN:$MKL_DLLDIR:$TBB_DIR:$PATH" \
+                MKL_INTERFACE_LAYER=LP64 \
+                Rscript timeit3.R "${SMTP:-pardiso}" 2>&1 | grep -E 'RESULT|FATAL|error' || true
+          }
+          echo "--- pardiso, TBB (all $NPROC cores) ---"
+          SMTP=pardiso run_cfg "pardiso-TBB" MKL_THREADING_LAYER=TBB | tee tbb3.txt
+          echo "--- pardiso, sequential (1 thread) ---"
+          SMTP=pardiso run_cfg "pardiso-SEQ" MKL_THREADING_LAYER=SEQUENTIAL | tee seq3.txt
+          echo "--- taucs (reference solver, no MKL) ---"
+          SMTP=taucs   run_cfg "taucs"        MKL_THREADING_LAYER=SEQUENTIAL | tee taucs3.txt
+          awk '
+            /RESULT/ {
+              for (i=1;i<=NF;i++) if ($i ~ /elapsed_median=/) { split($i,a,"="); m=a[2] }
+              if ($0 ~ /smtp=pardiso/ && tbb=="") tbb=m;
+              else if ($0 ~ /smtp=pardiso/) seq=m;
+              else if ($0 ~ /smtp=taucs/) tau=m;
+            }
+            END {
+              printf "\n==== SCALE SPEEDUP (besag 110x110, n=12100, median sec) ====\n";
+              printf "pardiso-TBB(%s thr) = %s\n", NPROC, tbb;
+              printf "pardiso-SEQ(1 thr)  = %s\n", seq;
+              printf "taucs               = %s\n", tau;
+              if (tbb>0) printf "MKL TBB speedup vs sequential = %.2fx\n", seq/tbb;
+              if (tbb>0) printf "pardiso-TBB vs taucs          = %.2fx\n", tau/tbb;
+            }' NPROC="$NPROC" tbb3.txt seq3.txt taucs3.txt
