@@ -58,18 +58,21 @@ jobs:
             mingw-w64-ucrt-x86_64-mumps
             mingw-w64-ucrt-x86_64-tools-git
 
-      - name: Inventory MUMPS / MPI artifacts
+      - name: Inventory MUMPS / MPI artifacts (discover exact pkg-config + headers)
         run: |
-          echo "--- dmumps_c.h ---"
-          find /ucrt64/include -iname 'dmumps_c.h' -o -iname 'mumps_c_types.h' 2>/dev/null | head
-          echo "--- mumps libs ---"
-          ls -1 /ucrt64/lib | grep -iE 'mumps|pord|scalapack' || true
-          echo "--- mpi.h + msmpi import lib ---"
-          find /ucrt64/include -iname 'mpi.h' 2>/dev/null | head
-          ls -1 /ucrt64/lib | grep -iE 'msmpi' || true
-          echo "--- MS-MPI runtime DLL on PATH? ---"
-          ls -1 "/c/Program Files/Microsoft MPI/Bin" 2>/dev/null || true
-          ls -1 /c/Windows/System32/msmpi.dll 2>/dev/null || true
+          echo "===== pkg-config packages mentioning mumps ====="
+          pkg-config --list-all 2>/dev/null | grep -iE 'mumps' || echo "(none)"
+          echo "===== .pc files in the mumps package ====="
+          pacman -Ql mingw-w64-ucrt-x86_64-mumps 2>/dev/null | grep -E '\.pc$' || true
+          for pc in $(pacman -Ql mingw-w64-ucrt-x86_64-mumps 2>/dev/null | grep -oE '/ucrt64/lib/pkgconfig/[^ ]*\.pc'); do
+            echo "----- $pc -----"; cat "$pc"; echo;
+          done
+          echo "===== dmumps_c.h locations ====="
+          pacman -Ql mingw-w64-ucrt-x86_64-mumps 2>/dev/null | grep -E 'dmumps_c\.h|mumps_c_types\.h|mpi\.h' || true
+          echo "===== mumps + ordering libs ====="
+          ls -1 /ucrt64/lib | grep -iE 'mumps|pord|scalapack|metis|scotch|esmumps|mpiseq' || true
+          echo "===== MS-MPI runtime present? ====="
+          ls -1 /c/Windows/System32/msmpi.dll 2>/dev/null || echo "(no system msmpi.dll)"
 
       - name: Write the MUMPS probe program
         run: |
@@ -144,22 +147,33 @@ jobs:
           EOF
           echo "wrote mprobe.c"
 
-      - name: Compile the MUMPS probe (MinGW gcc)
+      - name: Compile the MUMPS probe (sequential variant, via pkg-config)
+        continue-on-error: true
         run: |
-          set -e
           cd "$RUNNER_TEMP"
-          gcc -O2 mprobe.c -o mprobe.exe \
-              -I/ucrt64/include \
-              -L/ucrt64/lib \
-              -ldmumps -lmumps_common -lpord \
-              -lscalapack -lopenblas -lmsmpi -lgfortran -lquadmath -lm
-          echo "compiled. non-system DLL deps:"
-          ldd mprobe.exe | grep -iE 'mumps|scalapack|openblas|msmpi|gfortran' || true
+          # Prefer the SEQUENTIAL MUMPS (fake-MPI libseq): no MS-MPI runtime needed,
+          # simplest to package, still gets OpenMP/BLAS parallelism. Pick its pkg-config.
+          PC="$(pkg-config --list-all 2>/dev/null | grep -iE 'mumps' | awk '{print $1}')"
+          echo "candidate mumps pkg-config names: $PC"
+          # sequential variant first (…-dso = double sequential), else any double, else any
+          SEQPC="$(echo "$PC" | grep -iE 'dso|seq' | head -1)"
+          ANYD="$(echo "$PC" | grep -iE 'd' | head -1)"
+          PCNAME="${SEQPC:-${ANYD:-$(echo "$PC" | head -1)}}"
+          echo "using pkg-config package: $PCNAME"
+          if [ -n "$PCNAME" ]; then
+            echo "cflags: $(pkg-config --cflags "$PCNAME")"
+            echo "libs:   $(pkg-config --libs "$PCNAME")"
+            set -x
+            gcc -O2 mprobe.c -o mprobe.exe $(pkg-config --cflags "$PCNAME") $(pkg-config --libs "$PCNAME") -lgfortran -lquadmath -lm
+            set +x
+            echo "compiled OK; DLL deps:"; ldd mprobe.exe | grep -iE 'mumps|scalapack|openblas|msmpi|gfortran|metis|scotch' || true
+          else
+            echo "no mumps pkg-config found -- need manual lib names from the inventory above"
+          fi
 
-      - name: Run the MUMPS probe (1 rank)
+      - name: Run the MUMPS probe
+        continue-on-error: true
         run: |
-          set -e
           cd "$RUNNER_TEMP"
           export PATH="/ucrt64/bin:/c/Program Files/Microsoft MPI/Bin:$PATH"
-          # an MS-MPI program launched directly runs as a single rank
-          ./mprobe.exe
+          [ -f mprobe.exe ] && ./mprobe.exe || echo "no mprobe.exe (compile step did not produce it)"
