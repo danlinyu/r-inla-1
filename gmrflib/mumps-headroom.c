@@ -34,6 +34,31 @@
 int inla_ncpu(void) { return 1; }
 void *inla_stiles_get_setup(void *m) { (void) m; return NULL; }
 
+/* GMRFLib's unconditionally-compiled smtp-pardiso.o and the vendored taucs ordering
+ * reference these symbols at link time. With the taucs path they come from inlaprog's
+ * libpardiso.c, which we do not link. METIS51PARDISO_NodeND IS used by taucs's
+ * nested-dissection ordering -> wrap the system METIS. The pardiso entry points are
+ * never called with smtp=TAUCS -> no-op stubs just to satisfy the linker. */
+int METIS51PARDISO_NodeND(int *nvtxs, int *xadj, int *adjncy, int *vwgt, int *options, int *perm, int *iperm)
+{
+	int METIS_NodeND(int *, int *, int *, int *, int *, int *, int *);
+	return METIS_NodeND(nvtxs, xadj, adjncy, vwgt, options, perm, iperm);
+}
+void pardisoinit(void *a, int *b, int *c, int *d, double *e, int *f)
+{ (void) a; (void) b; (void) c; (void) d; (void) e; (void) f; }
+void pardiso(void *a, int *b, int *c, int *d, int *e, int *f, double *g, int *h, int *i, int *j,
+	     int *k, int *l, int *m, double *nn, double *o, int *p, double *q)
+{ (void) a; (void) b; (void) c; (void) d; (void) e; (void) f; (void) g; (void) h; (void) i; (void) j;
+  (void) k; (void) l; (void) m; (void) nn; (void) o; (void) p; (void) q; }
+void pardiso_residual(int *mtype, int *nn, double *a, int *ia, int *ja, double *b, double *x, double *y,
+		      double *norm_b, double *norm_res)
+{ (void) mtype; (void) nn; (void) a; (void) ia; (void) ja; (void) b; (void) x; (void) y; (void) norm_b; (void) norm_res; }
+void pardiso_chkmatrix(int *a, int *s, double *d, int *f, int *g, int *h)
+{ (void) a; (void) s; (void) d; (void) f; (void) g; (void) h; }
+void pardiso_chkvec(int *a, int *s, double *d, int *f) { (void) a; (void) s; (void) d; (void) f; }
+void pardiso_printstats(int *a, int *s, double *d, int *f, int *g, int *h, double *j, int *k)
+{ (void) a; (void) s; (void) d; (void) f; (void) g; (void) h; (void) j; (void) k; }
+
 /* SPD besag-like precision on the lattice graph: Q = (D + I) - W,
  * diagonally dominant -> SPD. The graph is passed as Qfunc_args. */
 static double Qfunc(int UNUSED(thread_id), int i, int j, double *UNUSED(values), void *arg)
