@@ -24,11 +24,20 @@ jobs:
       run:
         shell: msys2 {0}
     steps:
-      - name: Install MS-MPI runtime + SDK (choco)
+      - name: Install MS-MPI runtime (Microsoft official release)
         shell: pwsh
+        continue-on-error: true
         run: |
-          choco install -y msmpi --no-progress
-          # surface where the runtime + mpiexec landed
+          $ErrorActionPreference = "Continue"
+          # already present on the runner?
+          if (Test-Path "C:\Windows\System32\msmpi.dll") {
+            Write-Host "msmpi.dll already present in System32"
+          } else {
+            $url = "https://github.com/microsoft/Microsoft-MPI/releases/download/v10.1.1/msmpisetup.exe"
+            Write-Host "downloading MS-MPI from $url"
+            Invoke-WebRequest -Uri $url -OutFile "$env:RUNNER_TEMP\msmpisetup.exe"
+            Start-Process -FilePath "$env:RUNNER_TEMP\msmpisetup.exe" -ArgumentList "-unattend" -Wait
+          }
           Get-ChildItem -Path "C:\Program Files\Microsoft MPI" -Recurse -Filter "*.dll" -ErrorAction SilentlyContinue | Select-Object FullName
           Get-ChildItem -Path "C:\Windows\System32" -Filter "msmpi.dll" -ErrorAction SilentlyContinue | Select-Object FullName
           where.exe mpiexec 2>$null
