@@ -1,0 +1,156 @@
+name: mumps-probe
+
+# REAL CONTRIBUTION track: an open, parallel SELECTED-INVERSION backend for GMRFLib,
+# using MUMPS -- the same stack Rue's own group uses (Zhumekenov, Krainski & Rue,
+# Stat. Comput. 2025: PETSc + MUMPS, chosen over PARDISO because it is free/open).
+#
+# Probe phase (this file): settle the toolchain unknowns in ISOLATION (no GMRFLib):
+#   (1) install MUMPS + ScaLAPACK + OpenBLAS + MS-MPI on a windows-latest runner;
+#   (2) link libdmumps from the MSYS2/UCRT64 MinGW gcc toolchain;
+#   (3) run a 1-rank MPI MUMPS factor+solve on a small SPD matrix vs a known answer;
+#   (4) confirm the determinant (ICNTL(33)) -> log-determinant INLA needs.
+# Selected inversion (ICNTL(30)) is the NEXT probe step, once this toolchain links.
+# License-clean: MUMPS is CeCILL-C (open); no PARDISO/Panua code anywhere.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [mumps-selinv]
+
+jobs:
+  probe:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - name: Install MS-MPI runtime + SDK (choco)
+        shell: pwsh
+        run: |
+          choco install -y msmpi --no-progress
+          # surface where the runtime + mpiexec landed
+          Get-ChildItem -Path "C:\Program Files\Microsoft MPI" -Recurse -Filter "*.dll" -ErrorAction SilentlyContinue | Select-Object FullName
+          Get-ChildItem -Path "C:\Windows\System32" -Filter "msmpi.dll" -ErrorAction SilentlyContinue | Select-Object FullName
+          where.exe mpiexec 2>$null
+
+      - name: Set up MSYS2 (UCRT64)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          path-type: inherit
+          install: >-
+            base-devel
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-gcc-fortran
+            mingw-w64-ucrt-x86_64-openblas
+            mingw-w64-ucrt-x86_64-scalapack
+            mingw-w64-ucrt-x86_64-msmpi
+            mingw-w64-ucrt-x86_64-mumps
+            mingw-w64-ucrt-x86_64-tools-git
+
+      - name: Inventory MUMPS / MPI artifacts
+        run: |
+          echo "--- dmumps_c.h ---"
+          find /ucrt64/include -iname 'dmumps_c.h' -o -iname 'mumps_c_types.h' 2>/dev/null | head
+          echo "--- mumps libs ---"
+          ls -1 /ucrt64/lib | grep -iE 'mumps|pord|scalapack' || true
+          echo "--- mpi.h + msmpi import lib ---"
+          find /ucrt64/include -iname 'mpi.h' 2>/dev/null | head
+          ls -1 /ucrt64/lib | grep -iE 'msmpi' || true
+          echo "--- MS-MPI runtime DLL on PATH? ---"
+          ls -1 "/c/Program Files/Microsoft MPI/Bin" 2>/dev/null || true
+          ls -1 /c/Windows/System32/msmpi.dll 2>/dev/null || true
+
+      - name: Write the MUMPS probe program
+        run: |
+          cat > "$RUNNER_TEMP/mprobe.c" <<'EOF'
+          /* MUMPS toolchain probe. SPD matrix A = [[4,1,0],[1,4,1],[0,1,4]], det=56.
+             sym=1 -> supply LOWER triangle in assembled coordinate format, 1-based.
+             Solve A x = b (b=[1,1,1]); request the determinant via ICNTL(33)=1. */
+          #include <stdio.h>
+          #include <math.h>
+          #include <mpi.h>
+          #include "dmumps_c.h"
+          #define JOB_INIT -1
+          #define JOB_END  -2
+          #define USE_COMM_WORLD -987654
+          #define ICNTL(I)  icntl[(I)-1]
+          #define INFOG(I)  infog[(I)-1]
+          #define RINFOG(I) rinfog[(I)-1]
+
+          int main(int argc, char **argv){
+              DMUMPS_STRUC_C id;
+              MUMPS_INT  n   = 3;
+              MUMPS_INT8 nnz = 5;
+              MUMPS_INT  irn[5] = {1, 2, 2, 3, 3};
+              MUMPS_INT  jcn[5] = {1, 1, 2, 2, 3};
+              double     a[5]   = {4.0, 1.0, 4.0, 1.0, 4.0};
+              double     rhs[3] = {1.0, 1.0, 1.0};
+              int myid, ierr;
+
+              ierr = MPI_Init(&argc, &argv);
+              ierr = MPI_Comm_rank(MPI_COMM_WORLD, &myid);
+
+              id.comm_fortran = USE_COMM_WORLD;
+              id.par = 1;
+              id.sym = 1;                 /* symmetric positive definite */
+              id.job = JOB_INIT;
+              dmumps_c(&id);
+
+              if (myid == 0) {
+                  id.n = n; id.nnz = nnz;
+                  id.irn = irn; id.jcn = jcn;
+                  id.a = a; id.rhs = rhs;
+              }
+              id.ICNTL(1) = 6; id.ICNTL(2) = 0; id.ICNTL(3) = 0; id.ICNTL(4) = 1;
+              id.ICNTL(33) = 1;           /* compute the determinant during factorization */
+
+              id.job = 6;                 /* analyse + factorize + solve */
+              dmumps_c(&id);
+              printf("MUMPS job=6 INFOG(1)=%d INFOG(2)=%d\n", id.INFOG(1), id.INFOG(2));
+              if (id.INFOG(1) < 0) { id.job = JOB_END; dmumps_c(&id); MPI_Finalize(); return 10; }
+
+              if (myid == 0) {
+                  printf("solution x = [%g %g %g]\n", rhs[0], rhs[1], rhs[2]);
+                  double Ax0 = 4*rhs[0] + 1*rhs[1];
+                  double Ax1 = 1*rhs[0] + 4*rhs[1] + 1*rhs[2];
+                  double Ax2 = 1*rhs[1] + 4*rhs[2];
+                  double r = (Ax0-1)*(Ax0-1) + (Ax1-1)*(Ax1-1) + (Ax2-1)*(Ax2-1);
+                  printf("solve residual ||Ax-b|| = %.2e\n", sqrt(r));
+                  /* determinant = RINFOG(12) * 2^INFOG(34) */
+                  double mant = id.RINFOG(12);
+                  int    e2   = id.INFOG(34);
+                  double logdet = log(fabs(mant)) + (double)e2 * log(2.0);
+                  printf("det: mantissa=%g exp2=%d  logdet=%.6f  expected log(56)=%.6f  diff=%.2e\n",
+                         mant, e2, logdet, log(56.0), fabs(logdet - log(56.0)));
+              }
+
+              id.job = JOB_END;
+              dmumps_c(&id);
+              ierr = MPI_Finalize();
+              if (myid == 0) printf("MUMPS PROBE OK\n");
+              return 0;
+          }
+          EOF
+          echo "wrote mprobe.c"
+
+      - name: Compile the MUMPS probe (MinGW gcc)
+        run: |
+          set -e
+          cd "$RUNNER_TEMP"
+          gcc -O2 mprobe.c -o mprobe.exe \
+              -I/ucrt64/include \
+              -L/ucrt64/lib \
+              -ldmumps -lmumps_common -lpord \
+              -lscalapack -lopenblas -lmsmpi -lgfortran -lquadmath -lm
+          echo "compiled. non-system DLL deps:"
+          ldd mprobe.exe | grep -iE 'mumps|scalapack|openblas|msmpi|gfortran' || true
+
+      - name: Run the MUMPS probe (1 rank)
+        run: |
+          set -e
+          cd "$RUNNER_TEMP"
+          export PATH="/ucrt64/bin:/c/Program Files/Microsoft MPI/Bin:$PATH"
+          # an MS-MPI program launched directly runs as a single rank
+          ./mprobe.exe
