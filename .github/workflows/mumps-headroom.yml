@@ -1,0 +1,87 @@
+name: mumps-headroom
+
+# Headroom benchmark: does MUMPS's parallel selected inversion beat taucs's
+# Takahashi at scale (n=12100)? Build GMRFLib (taucs path), compile a standalone
+# bench that computes factor + FULL selected inverse on the SAME besag Q two ways
+# -- GMRFLib taucs (init_problem + Qinv) and MUMPS (job=4 + ICNTL(30)) -- in one
+# process, no INLA/R overhead. Run at 1 and 4 threads to show parallel scaling.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [mumps-selinv]
+    paths: ['gmrflib/mumps-headroom.c', '.github/workflows/mumps-headroom.yml']
+
+jobs:
+  headroom:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up MSYS2 (UCRT64)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          path-type: inherit
+          install: >-
+            base-devel
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-gcc-fortran
+            mingw-w64-ucrt-x86_64-openblas
+            mingw-w64-ucrt-x86_64-gsl
+            mingw-w64-ucrt-x86_64-metis
+            mingw-w64-ucrt-x86_64-openssl
+            mingw-w64-ucrt-x86_64-suitesparse
+            mingw-w64-ucrt-x86_64-libtool
+            mingw-w64-ucrt-x86_64-scalapack
+            mingw-w64-ucrt-x86_64-mumps
+
+      - name: Build + install GMRFLib (taucs path)
+        run: |
+          set -e
+          PREFIX="$PWD/local"
+          mkdir -p "$PREFIX/lib" "$PREFIX/include" "$PREFIX/bin"
+          make -C gmrflib \
+            PREFIX="$PREFIX" LEXTPREFIX=/ucrt64 \
+            CC=gcc CXX=g++ FC=gfortran \
+            FLAGS="-O2 -fopenmp -pthread -DINLA_WITH_OPENBLAS"
+          make -C gmrflib PREFIX="$PREFIX" LEXTPREFIX=/ucrt64 install
+          cp gmrflib/taucs/libtaucs.a "$PREFIX/lib/" 2>/dev/null || true
+          echo "PREFIX=$PREFIX" >> "$GITHUB_ENV"
+
+      - name: Compile + link the headroom benchmark (GMRFLib taucs + MUMPS)
+        run: |
+          set -e
+          PCNAME="$(pkg-config --list-all 2>/dev/null | grep -iE 'mumps' | awk '{print $1}' | grep -iE 'dto' | head -1)"
+          echo "MUMPS pkg-config: $PCNAME"
+          echo "  cflags: $(pkg-config --cflags "$PCNAME")"
+          echo "  libs:   $(pkg-config --libs "$PCNAME")"
+          gcc -O2 -fopenmp -I"$PREFIX/include" $(pkg-config --cflags "$PCNAME") \
+              gmrflib/mumps-headroom.c -o headroom.exe \
+              -L"$PREFIX/lib" -Wl,--start-group -lGMRFLib -ltaucs -Wl,--end-group \
+              $(pkg-config --libs "$PCNAME") \
+              -lgsl -lmetis -lopenblas -lcrypto -lz -lstdc++ -lgfortran -lquadmath -lm
+          echo "linked. DLL deps:"
+          ldd headroom.exe | grep -iE 'mumps|scotch|metis|openblas|gsl|gfortran' || true
+
+      - name: Run benchmark (1 thread)
+        run: |
+          set -e
+          export PATH="/ucrt64/bin:$PATH"
+          export OMP_NUM_THREADS=1
+          export OPENBLAS_NUM_THREADS=1
+          echo "================ 1 THREAD ================"
+          ./headroom.exe
+
+      - name: Run benchmark (4 threads)
+        run: |
+          set -e
+          export PATH="/ucrt64/bin:$PATH"
+          export OMP_NUM_THREADS=4
+          export OPENBLAS_NUM_THREADS=4
+          echo "================ 4 THREADS ================"
+          ./headroom.exe
