@@ -112,6 +112,8 @@ typedef struct {
 	void *pt;
 	int n;
 	double *D;					       /* LDL^T pivots, length n */
+	int have_iparm;					       /* set once the factor's iparm is captured */
+	int iparm[64];					       /* iparm state AS LEFT BY the phase-22 factor */
 } pmkl_scratch_tp;
 
 #define PMKL_MAX_SCRATCH (16384)
@@ -134,6 +136,7 @@ static pmkl_scratch_tp *pmkl_scratch_get(void *pt, int create)
 			s->pt = pt;
 			s->n = 0;
 			s->D = NULL;
+			s->have_iparm = 0;
 		}
 	}
 	return s;
@@ -237,10 +240,18 @@ void pardiso(void *pt, int *maxfct, int *mnum, int *mtype, int *phase, int *n,
 			 * or spill onto the factor's fill pattern (-> overflow = the earlier crash)? */
 			int ph = -22, qerr = 0, snrhs = 1;
 			double bdum = 0.0, xdum = 0.0;
-			my_iparm[35] = 0;		       /* iparm(36)=0: selected inverse, overwrite L/U */
-			fprintf(stderr, "\t[pmkl] native phase=-22 selinv: n=%d nnz=%d base=%d a[0]=%g\n",
-				nn, nnz, base, a[0]);
-			mkl_pardiso_p(pt, maxfct, mnum, mtype, &ph, n, a, ia, ja, perm, &snrhs, my_iparm, msglvl,
+			/* reuse the factorization's iparm (a fresh default one -> err=-1) */
+			pmkl_scratch_tp *sq = pmkl_scratch_get(pt, 0);
+			int qiparm[64];
+			if (sq && sq->have_iparm) {
+				memcpy(qiparm, sq->iparm, sizeof(qiparm));
+			} else {
+				memcpy(qiparm, my_iparm, sizeof(qiparm));
+			}
+			qiparm[35] = 0;			       /* iparm(36)=0: selected inverse, overwrite L/U */
+			fprintf(stderr, "\t[pmkl] native phase=-22 selinv: n=%d nnz=%d base=%d a[0]=%g have_iparm=%d\n",
+				nn, nnz, base, a[0], (sq ? sq->have_iparm : -1));
+			mkl_pardiso_p(pt, maxfct, mnum, mtype, &ph, n, a, ia, ja, perm, &snrhs, qiparm, msglvl,
 				      &bdum, &xdum, &qerr);
 			fprintf(stderr, "\t[pmkl] native selinv returned err=%d  a[0..2]=%g %g %g\n",
 				qerr, a[0], (nnz > 1 ? a[1] : 0.0), (nnz > 2 ? a[2] : 0.0));
@@ -330,6 +341,15 @@ void pardiso(void *pt, int *maxfct, int *mnum, int *mtype, int *phase, int *n,
 		if (*error == 0) {
 			int nn = *n;
 			pmkl_scratch_tp *s = pmkl_scratch_get(pt, 1);
+
+			/* Remember the iparm AS LEFT BY the factorization. oneMKL's native
+			 * selected inversion (phase=-22) is a CONTINUATION of the factor and
+			 * needs that iparm state; a fresh default iparm makes it report
+			 * err=-1 ("input inconsistent"). Capture it here for the -22 path. */
+			if (s) {
+				memcpy(s->iparm, my_iparm, sizeof(s->iparm));
+				s->have_iparm = 1;
+			}
 
 			/* log-determinant via the LDL^T pivots (getdiag), written into dparm[32] */
 			double *D = (double *) malloc((size_t) nn * sizeof(double));
