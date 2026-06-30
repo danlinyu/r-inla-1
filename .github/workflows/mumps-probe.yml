@@ -24,23 +24,8 @@ jobs:
       run:
         shell: msys2 {0}
     steps:
-      - name: Install MS-MPI runtime (Microsoft official release)
-        shell: pwsh
-        continue-on-error: true
-        run: |
-          $ErrorActionPreference = "Continue"
-          # already present on the runner?
-          if (Test-Path "C:\Windows\System32\msmpi.dll") {
-            Write-Host "msmpi.dll already present in System32"
-          } else {
-            $url = "https://github.com/microsoft/Microsoft-MPI/releases/download/v10.1.1/msmpisetup.exe"
-            Write-Host "downloading MS-MPI from $url"
-            Invoke-WebRequest -Uri $url -OutFile "$env:RUNNER_TEMP\msmpisetup.exe"
-            Start-Process -FilePath "$env:RUNNER_TEMP\msmpisetup.exe" -ArgumentList "-unattend" -Wait
-          }
-          Get-ChildItem -Path "C:\Program Files\Microsoft MPI" -Recurse -Filter "*.dll" -ErrorAction SilentlyContinue | Select-Object FullName
-          Get-ChildItem -Path "C:\Windows\System32" -Filter "msmpi.dll" -ErrorAction SilentlyContinue | Select-Object FullName
-          where.exe mpiexec 2>$null
+      # No MS-MPI step: the libseq MUMPS variants (mumps-dso / mumps-dto) use a
+      # fake-MPI, so no MS-MPI runtime is needed (Stage-0 ldd confirmed: no msmpi.dll).
 
       - name: Set up MSYS2 (UCRT64)
         uses: msys2/setup-msys2@v2
@@ -77,9 +62,12 @@ jobs:
       - name: Write the MUMPS probe program
         run: |
           cat > "$RUNNER_TEMP/mprobe.c" <<'EOF'
-          /* MUMPS toolchain probe. SPD matrix A = [[4,1,0],[1,4,1],[0,1,4]], det=56.
-             sym=1 -> supply LOWER triangle in assembled coordinate format, 1-based.
-             Solve A x = b (b=[1,1,1]); request the determinant via ICNTL(33)=1. */
+          /* MUMPS probe. SPD A = [[4,1,0],[1,4,1],[0,1,4]], det=56,
+             A^-1 = (1/56)[[15,-4,1],[-4,16,-4],[1,-4,15]].
+             sym=1 -> LOWER triangle, assembled coords, 1-based. Tests:
+               (1) factorize + logdet via ICNTL(33);
+               (2) SELECTED INVERSION via ICNTL(30): request A^-1 on Q's pattern,
+                   compare to the known dense inverse. THIS is the whole point. */
           #include <stdio.h>
           #include <math.h>
           #include <mpi.h>
@@ -98,7 +86,6 @@ jobs:
               MUMPS_INT  irn[5] = {1, 2, 2, 3, 3};
               MUMPS_INT  jcn[5] = {1, 1, 2, 2, 3};
               double     a[5]   = {4.0, 1.0, 4.0, 1.0, 4.0};
-              double     rhs[3] = {1.0, 1.0, 1.0};
               int myid, ierr;
 
               ierr = MPI_Init(&argc, &argv);
@@ -112,30 +99,49 @@ jobs:
 
               if (myid == 0) {
                   id.n = n; id.nnz = nnz;
-                  id.irn = irn; id.jcn = jcn;
-                  id.a = a; id.rhs = rhs;
+                  id.irn = irn; id.jcn = jcn; id.a = a;
               }
               id.ICNTL(1) = 6; id.ICNTL(2) = 0; id.ICNTL(3) = 0; id.ICNTL(4) = 1;
-              id.ICNTL(33) = 1;           /* compute the determinant during factorization */
+              id.ICNTL(33) = 1;           /* determinant during factorization */
 
-              id.job = 6;                 /* analyse + factorize + solve */
+              id.job = 4;                 /* analyse + factorize */
               dmumps_c(&id);
-              printf("MUMPS job=6 INFOG(1)=%d INFOG(2)=%d\n", id.INFOG(1), id.INFOG(2));
+              printf("MUMPS factorize INFOG(1)=%d INFOG(2)=%d\n", id.INFOG(1), id.INFOG(2));
               if (id.INFOG(1) < 0) { id.job = JOB_END; dmumps_c(&id); MPI_Finalize(); return 10; }
 
+              double mant = id.RINFOG(12); int e2 = id.INFOG(34);
+              double logdet = log(fabs(mant)) + (double)e2 * log(2.0);
+              printf("logdet = %.6f  expected log(56)=%.6f  diff=%.2e\n",
+                     logdet, log(56.0), fabs(logdet - log(56.0)));
+
+              /* ---- SELECTED INVERSION (ICNTL(30)=1): request A^-1 on Q's pattern ----
+                 columns -> rows:  col1:{1,2}  col2:{2,3}  col3:{3}  (lower triangle) */
+              MUMPS_INT nrhs = 3, nz_rhs = 5;
+              MUMPS_INT irhs_ptr[4]    = {1, 3, 5, 6};       /* NRHS+1 col pointers, 1-based */
+              MUMPS_INT irhs_sparse[5] = {1, 2, 2, 3, 3};    /* row indices */
+              double    rhs_sparse[5]  = {0,0,0,0,0};
               if (myid == 0) {
-                  printf("solution x = [%g %g %g]\n", rhs[0], rhs[1], rhs[2]);
-                  double Ax0 = 4*rhs[0] + 1*rhs[1];
-                  double Ax1 = 1*rhs[0] + 4*rhs[1] + 1*rhs[2];
-                  double Ax2 = 1*rhs[1] + 4*rhs[2];
-                  double r = (Ax0-1)*(Ax0-1) + (Ax1-1)*(Ax1-1) + (Ax2-1)*(Ax2-1);
-                  printf("solve residual ||Ax-b|| = %.2e\n", sqrt(r));
-                  /* determinant = RINFOG(12) * 2^INFOG(34) */
-                  double mant = id.RINFOG(12);
-                  int    e2   = id.INFOG(34);
-                  double logdet = log(fabs(mant)) + (double)e2 * log(2.0);
-                  printf("det: mantissa=%g exp2=%d  logdet=%.6f  expected log(56)=%.6f  diff=%.2e\n",
-                         mant, e2, logdet, log(56.0), fabs(logdet - log(56.0)));
+                  id.ICNTL(30) = 1;
+                  id.nrhs = nrhs; id.lrhs = n;
+                  id.nz_rhs = nz_rhs;
+                  id.irhs_ptr = irhs_ptr;
+                  id.irhs_sparse = irhs_sparse;
+                  id.rhs_sparse = rhs_sparse;
+              }
+              id.job = 3;                 /* solve -> selected inverse entries */
+              dmumps_c(&id);
+              printf("MUMPS selinv INFOG(1)=%d INFOG(2)=%d\n", id.INFOG(1), id.INFOG(2));
+
+              if (myid == 0 && id.INFOG(1) >= 0) {
+                  double expv[5] = {15.0/56.0, -4.0/56.0, 16.0/56.0, -4.0/56.0, 15.0/56.0};
+                  double maxerr = 0.0;
+                  for (int k = 0; k < 5; k++) {
+                      double e = fabs(rhs_sparse[k] - expv[k]);
+                      if (e > maxerr) maxerr = e;
+                      printf("  Ainv[row=%d] = %.8f   expected %.8f   err %.2e\n",
+                             irhs_sparse[k], rhs_sparse[k], expv[k], e);
+                  }
+                  printf("SELINV max abs err = %.2e\n", maxerr);
               }
 
               id.job = JOB_END;
@@ -155,16 +161,18 @@ jobs:
           # simplest to package, still gets OpenMP/BLAS parallelism. Pick its pkg-config.
           PC="$(pkg-config --list-all 2>/dev/null | grep -iE 'mumps' | awk '{print $1}')"
           echo "candidate mumps pkg-config names: $PC"
-          # sequential variant first (…-dso = double sequential), else any double, else any
-          SEQPC="$(echo "$PC" | grep -iE 'dso|seq' | head -1)"
-          ANYD="$(echo "$PC" | grep -iE 'd' | head -1)"
-          PCNAME="${SEQPC:-${ANYD:-$(echo "$PC" | head -1)}}"
+          # prefer the OpenMP libseq double variant (…-dto): parallel, no MS-MPI.
+          # fall back to dso (sequential libseq), then any double, then any.
+          DTOPC="$(echo "$PC" | grep -iE 'dto' | head -1)"
+          DSOPC="$(echo "$PC" | grep -iE 'dso' | head -1)"
+          ANYD="$(echo "$PC" | grep -iE '\-d' | head -1)"
+          PCNAME="${DTOPC:-${DSOPC:-${ANYD:-$(echo "$PC" | head -1)}}}"
           echo "using pkg-config package: $PCNAME"
           if [ -n "$PCNAME" ]; then
             echo "cflags: $(pkg-config --cflags "$PCNAME")"
             echo "libs:   $(pkg-config --libs "$PCNAME")"
             set -x
-            gcc -O2 mprobe.c -o mprobe.exe $(pkg-config --cflags "$PCNAME") $(pkg-config --libs "$PCNAME") -lgfortran -lquadmath -lm
+            gcc -O2 -fopenmp mprobe.c -o mprobe.exe $(pkg-config --cflags "$PCNAME") $(pkg-config --libs "$PCNAME") -lgfortran -lquadmath -lm
             set +x
             echo "compiled OK; DLL deps:"; ldd mprobe.exe | grep -iE 'mumps|scalapack|openblas|msmpi|gfortran|metis|scotch' || true
           else
