@@ -89,16 +89,28 @@ jobs:
 
       - name: Run validation (TBB-threaded MKL)
         run: |
-          set -e
-          # tbb12.dll ships in the python prefix alongside mkl_rt (same dir as
-          # MKL_DLLDIR); the MKL TBB threading layer (mkl_tbb_thread.3.dll) needs it.
-          # Threading is selected purely by MKL_THREADING_LAYER=TBB; under TBB, MKL
-          # uses all cores by default and composes with libgomp via its work-stealing
-          # arena. (Do NOT call the Fortran-ABI mkl_set_num_threads -- it takes its
-          # arg by reference and segfaults if called by value.)
+          # NOTE: deliberately NO `set -e` -- the native-selinv experiment below may
+          # crash or return an error, and that outcome is the data we want. Only the
+          # DEFAULT path gates the job (explicit exit at the end).
+          # tbb12.dll ships in the python prefix alongside mkl_rt (= MKL_DLLDIR); the
+          # MKL TBB threading layer (mkl_tbb_thread.3.dll) needs it. Threading is
+          # selected purely by MKL_THREADING_LAYER=TBB. (Do NOT call the Fortran-ABI
+          # mkl_set_num_threads -- by-reference; calling it by value segfaults.)
           cp validate.exe "$MKL_DLLDIR/"
           cd "$MKL_DLLDIR"
           export PATH="$PATH:/ucrt64/bin"
           export MKL_THREADING_LAYER=TBB
           export MKL_INTERFACE_LAYER=LP64
-          ./validate.exe
+          echo "==================== DEFAULT Qinv (O(n) full solves) ===================="
+          ./validate.exe ; rc_default=$?
+          echo "[default exit=$rc_default]"
+          echo
+          echo "==================== EXPERIMENT: native oneMKL phase=-22 selinv ===================="
+          # Resolve empirically whether oneMKL's native selected inversion works and
+          # stays on Q's pattern. A crash (vs a clean err code) means it spilled onto
+          # the factor's fill pattern. Exploratory -- never gates the job.
+          ( PMKL_NATIVE_QINV=1 ./validate.exe ) ; rc_native=$?
+          echo "[native exit=$rc_native]"
+          echo
+          echo "default rc=$rc_default  native rc=$rc_native (native is exploratory)"
+          exit $rc_default

@@ -219,14 +219,38 @@ void pardiso(void *pt, int *maxfct, int *mnum, int *mtype, int *phase, int *n,
 
 	if (caller_phase == -22) {
 		/* Selected inverse: fill a[] (on the upper-triangular (ia,ja) pattern) with
-		 * the corresponding elements of Q^{-1}. oneMKL's own phase=-22 selected
-		 * inversion is not used here (it is not a clean drop-in for the Panua pattern
-		 * convention); instead we compute the needed elements with full solves
-		 * Q X = I, which reuse the validated full solve and are exact. This is correct
-		 * but O(n) solves; a Takahashi recursion is the future performance optimization. */
+		 * the corresponding elements of Q^{-1}. The DEFAULT path computes the needed
+		 * elements with full solves Q X = I (reuses the validated full solve, exact,
+		 * but O(n) solves). When PMKL_NATIVE_QINV is set we instead try oneMKL's OWN
+		 * phase=-22 selected inversion (a real parallel Takahashi) -- experimental,
+		 * validated empirically vs dense LAPACK in pardiso-mkl-validate.c. */
 		int nn = *n;
 		int base = ia[0];			       /* 1-based in this build */
 		int nnz = ia[nn] - base;
+
+		if (getenv("PMKL_NATIVE_QINV")) {
+			/* oneMKL native selected inversion. The phase-22 factor is already in pt
+			 * (GMRFLib called chol before Qinv). iparm(36)=0 (iparm[35]=0) selects the
+			 * "overwrite L/U with the selected inverse" mode; oneMKL writes the inverse
+			 * back into a[] on the input matrix's pattern. THE open question (resolved
+			 * by this experiment): does it stay on Q's pattern (a[] sized nnz -> safe)
+			 * or spill onto the factor's fill pattern (-> overflow = the earlier crash)? */
+			int ph = -22, qerr = 0, snrhs = 1;
+			double bdum = 0.0, xdum = 0.0;
+			my_iparm[35] = 0;		       /* iparm(36)=0: selected inverse, overwrite L/U */
+			fprintf(stderr, "\t[pmkl] native phase=-22 selinv: n=%d nnz=%d base=%d a[0]=%g\n",
+				nn, nnz, base, a[0]);
+			mkl_pardiso_p(pt, maxfct, mnum, mtype, &ph, n, a, ia, ja, perm, &snrhs, my_iparm, msglvl,
+				      &bdum, &xdum, &qerr);
+			fprintf(stderr, "\t[pmkl] native selinv returned err=%d  a[0..2]=%g %g %g\n",
+				qerr, a[0], (nnz > 1 ? a[1] : 0.0), (nnz > 2 ? a[2] : 0.0));
+			if (qerr == 0) {
+				*error = 0;
+				return;		       /* a[] now holds Q^{-1} on Q's pattern */
+			}
+			fprintf(stderr, "\t[pmkl] native selinv FAILED (err=%d) -> fall back to full-solve Qinv\n", qerr);
+			/* fall through to the validated O(n)-solve path below */
+		}
 
 		/* transpose the upper CSR pattern into per-column lists (0-based column j) */
 		int *colptr = (int *) calloc((size_t) (nn + 1), sizeof(int));
