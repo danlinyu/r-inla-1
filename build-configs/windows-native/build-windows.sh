@@ -48,15 +48,32 @@ pacman -S --needed --noconfirm \
   mingw-w64-ucrt-x86_64-zlib \
   mingw-w64-ucrt-x86_64-openssl \
   mingw-w64-ucrt-x86_64-suitesparse \
-  mingw-w64-ucrt-x86_64-libtool
+  mingw-w64-ucrt-x86_64-libtool \
+  mingw-w64-ucrt-x86_64-cmake
 
-# --- 2. vendor SIMDE (header-only; no MSYS2 package exists) -----------------------------
+# --- 2a. vendor SIMDE (header-only; no MSYS2 package exists) ----------------------------
 if [ ! -f "$PWD/extern/simde/simde/x86/sse2.h" ]; then
   echo "== vendoring SIMDE v0.8.2 ..."
   rm -rf "$PWD/extern/simde"
   git clone --depth 1 --branch v0.8.2 https://github.com/simd-everywhere/simde.git "$PWD/extern/simde"
 fi
 SIMDE_INC="-I$PWD/extern/simde"
+
+# --- 2b. vendor + build STATIC muParser (UCRT64 ships ONLY the shared lib) --------------
+# Without this, -lmuparser has no static .a; a dynamic libmuparser.dll would drag
+# libstdc++-6.dll/libgcc_s/libwinpthread back into the bundle. Build our own static lib.
+if [ ! -d "$PWD/extern/muparser" ]; then
+  echo "== vendoring + building static muParser v2.3.4 ..."
+  git clone --depth 1 --branch v2.3.4 https://github.com/beltoforion/muparser.git "$PWD/extern/muparser"
+fi
+cmake -S "$PWD/extern/muparser" -B "$PWD/extern/muparser/build" \
+  -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Release \
+  -DBUILD_SHARED_LIBS=OFF -DENABLE_SAMPLES=OFF -DENABLE_OPENMP=OFF
+cmake --build "$PWD/extern/muparser/build" -j
+MUPARSER_A="$(find "$PWD/extern/muparser/build" -name 'libmuparser*.a' | head -1)"
+test -n "$MUPARSER_A" && test -f "$MUPARSER_A" || { echo "ERROR: static libmuparser.a not built" >&2; exit 1; }
+MUPARSER_INC="-I$PWD/extern/muparser/include"
+echo "== static muParser: $MUPARSER_A"
 
 # --- 3. build + install GMRFLib, stage taucs -------------------------------------------
 echo "== building GMRFLib ..."
@@ -110,20 +127,23 @@ echo "== generating cgeneric headers ..."
 #                     in ws2_32/crypt32); set STATIC_CRYPTO=1 to try static (adds those libs).
 # EXTLIBS3          : Fortran runtime static; -lm is a system stub.
 echo "== building inlaprog (static link) ; STATIC_CRYPTO=$STATIC_CRYPTO"
+# muParser is linked as our full-path static archive ($MUPARSER_A). crypto:
+#   STATIC_CRYPTO=1 -> static libcrypto + its Windows import libs (default; smallest bundle)
+#   STATIC_CRYPTO=0 -> dynamic libcrypto (ships libcrypto-3-x64.dll) via a -Bdynamic island
 if [ "$STATIC_CRYPTO" = "1" ]; then
-  EXTLIBS2="-lgsl -lmetis -lopenblas -lmuparser -lz -lltdl -lcrypto -lws2_32 -lcrypt32 -lbcrypt"
+  CRYPTO="-lcrypto -lws2_32 -lcrypt32 -lbcrypt -ladvapi32 -luser32"
 else
-  EXTLIBS2="-lgsl -lmetis -lopenblas -lmuparser -lz -lltdl -Wl,-Bdynamic -lcrypto -Wl,-Bstatic"
+  CRYPTO="-Wl,-Bdynamic -lcrypto -Wl,-Bstatic"
 fi
 make -C inlaprog \
   PREFIX="$PREFIX" LEXTPREFIX=/ucrt64 \
   CC=gcc CXX=g++ FC=gfortran \
-  FLAGS="-std=gnu99 -O2 -fopenmp -pipe -DINLA_WITH_OPENBLAS -DINLA_WITH_SIMDE -DINLA_WITH_MUPARSER $SIMDE_INC" \
+  FLAGS="-std=gnu99 -O2 -fopenmp -pipe -DINLA_WITH_OPENBLAS -DINLA_WITH_SIMDE -DINLA_WITH_MUPARSER $SIMDE_INC $MUPARSER_INC" \
   LDFLAGS="-O2 -fopenmp -pipe -static -static-libgcc -static-libstdc++" \
   RLIB_INC="-DINLA_WITH_LIBR -I$RHOME/include" \
   RLIB_LIB="-L$RBIN -Wl,-Bdynamic -lRmathfwd -lR -Wl,-Bstatic" \
   EXTLIBS1="-L$PREFIX/lib -lGMRFLib -ltaucs" \
-  EXTLIBS2="$EXTLIBS2" \
+  EXTLIBS2="-lgsl -lmetis -lopenblas $MUPARSER_A -lz -lltdl $CRYPTO" \
   EXTLIBS3="-lgfortran -lquadmath -lm"
 
 test -f inlaprog/inla.exe || { echo "ERROR: inla.exe was not produced" >&2; exit 1; }

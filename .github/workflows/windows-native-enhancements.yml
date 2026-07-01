@@ -49,6 +49,7 @@ jobs:
             mingw-w64-ucrt-x86_64-openssl
             mingw-w64-ucrt-x86_64-suitesparse
             mingw-w64-ucrt-x86_64-libtool
+            mingw-w64-ucrt-x86_64-cmake
 
       - name: Inventory UCRT64 static archives (evidence for static-linkability)
         run: |
@@ -68,6 +69,27 @@ jobs:
           test -f "$PWD/extern/simde/simde/x86/sse2.h"
           echo "SIMDE_INC=-I$PWD/extern/simde" >> "$GITHUB_ENV"
           echo "vendored simde v0.8.2 at $PWD/extern/simde"
+
+      - name: Vendor + build STATIC muParser (UCRT64 ships ONLY the shared lib)
+        # The inventory step confirms muparser has no /ucrt64/lib/libmuparser.a, so under
+        # global -static the link fails ("cannot find -lmuparser"). Keeping it dynamic would
+        # drag libmuparser.dll -> libstdc++-6.dll -> libgcc_s/libwinpthread back into the
+        # bundle, undoing the -static-libstdc++/-static-libgcc win. muParser is a small,
+        # self-contained C++ lib: build our own static archive and link it by full path.
+        run: |
+          set -e
+          if [ ! -d extern/muparser ]; then
+            git clone --depth 1 --branch v2.3.4 https://github.com/beltoforion/muparser.git extern/muparser
+          fi
+          cmake -S extern/muparser -B extern/muparser/build \
+            -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=OFF -DENABLE_SAMPLES=OFF -DENABLE_OPENMP=OFF
+          cmake --build extern/muparser/build -j
+          MUPARSER_A="$(find "$PWD/extern/muparser/build" -name 'libmuparser*.a' | head -1)"
+          test -n "$MUPARSER_A" && test -f "$MUPARSER_A"
+          echo "MUPARSER_A=$MUPARSER_A" >> "$GITHUB_ENV"
+          echo "MUPARSER_INC=-I$PWD/extern/muparser/include" >> "$GITHUB_ENV"
+          echo "built static muParser: $MUPARSER_A"
 
       - name: Build + install GMRFLib
         run: |
@@ -130,15 +152,18 @@ jobs:
           #   in ws2_32/crypt32 and is brittle) via a -Bdynamic island, then -Bstatic.
           # EXTLIBS3: Fortran runtime (libgfortran + libquadmath) static; -lm is system.
           # ---------------------------------------------------------------------------
+          # muParser: link OUR static archive by full path (always static, no -l needed).
+          # crypto: linked statically here; static libcrypto pulls the Windows crypto/socket
+          #   import libs (ws2_32/crypt32/bcrypt/advapi32/user32) which resolve to system DLLs.
           make -C inlaprog \
             PREFIX="$PREFIX" LEXTPREFIX=/ucrt64 \
             CC=gcc CXX=g++ FC=gfortran \
-            FLAGS="-std=gnu99 -O2 -fopenmp -pipe -DINLA_WITH_OPENBLAS -DINLA_WITH_SIMDE -DINLA_WITH_MUPARSER $SIMDE_INC" \
+            FLAGS="-std=gnu99 -O2 -fopenmp -pipe -DINLA_WITH_OPENBLAS -DINLA_WITH_SIMDE -DINLA_WITH_MUPARSER $SIMDE_INC $MUPARSER_INC" \
             LDFLAGS="-O2 -fopenmp -pipe -static -static-libgcc -static-libstdc++" \
             RLIB_INC="-DINLA_WITH_LIBR -I$RHOME/include" \
             RLIB_LIB="-L$RBIN -Wl,-Bdynamic -lRmathfwd -lR -Wl,-Bstatic" \
             EXTLIBS1="-L$PREFIX/lib -lGMRFLib -ltaucs" \
-            EXTLIBS2="-lgsl -lmetis -lopenblas -lmuparser -lz -lltdl -Wl,-Bdynamic -lcrypto -Wl,-Bstatic" \
+            EXTLIBS2="-lgsl -lmetis -lopenblas $MUPARSER_A -lz -lltdl -lcrypto -lws2_32 -lcrypt32 -lbcrypt -ladvapi32 -luser32" \
             EXTLIBS3="-lgfortran -lquadmath -lm" \
             2>&1 | tee inlaprog-build.log
           echo "make exit status: ${PIPESTATUS[0]}"
