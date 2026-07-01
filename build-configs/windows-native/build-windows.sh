@@ -30,7 +30,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
 echo "== repo root: $REPO_ROOT"
 
-STATIC_CRYPTO="${STATIC_CRYPTO:-0}"   # set to 1 to also statically link libcrypto (see notes)
+STATIC_CRYPTO="${STATIC_CRYPTO:-1}"   # 1 = static libcrypto (2-file bundle, CI-proven); 0 = dynamic crypto
 PREFIX="$PWD/local"
 
 # --- 1. install UCRT64 deps (idempotent) -----------------------------------------------

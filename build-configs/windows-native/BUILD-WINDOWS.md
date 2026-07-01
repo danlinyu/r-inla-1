@@ -4,12 +4,13 @@
 Actions**, no cross-compilation. It is the local, one-command distillation of the CI
 workflow `.github/workflows/windows-native-enhancements.yml`, and produces the same
 **statically-linked** engine: the numeric stack (OpenBLAS, GSL, METIS, muParser, zlib,
-ltdl, gfortran/quadmath) and the GCC runtime (libgomp, libstdc++, libgcc, libwinpthread)
-are baked into `inla.exe`. Only `R.dll` (your R install) and `Rmathfwd.dll` (the Rmath
-forwarder into `R.dll`) stay dynamic — R cannot be statically linked.
+ltdl, gfortran/quadmath, libcrypto) and the GCC runtime (libgomp, libstdc++, libgcc,
+libwinpthread) are baked into `inla.exe`. Only `R.dll` (your R install) and `Rmathfwd.dll`
+(the Rmath forwarder into `R.dll`) stay dynamic — R cannot be statically linked.
 
-Result: a drop-in `bundle/` containing **`inla.exe` + `Rmathfwd.dll`** (plus
-`libcrypto-3-x64.dll` unless you opt into static crypto — see below).
+Result (CI-verified): a drop-in `bundle/` of exactly **`inla.exe` + `Rmathfwd.dll`** — the
+whole ~13-DLL MinGW/UCRT64 runtime is gone. (`R.dll`, `Rblas.dll`, `Rgraphapp.dll` are the
+user's own R and are never bundled.)
 
 ## Prerequisites
 
@@ -41,17 +42,16 @@ R import lib + `Rmathfwd.dll` → cgeneric headers → static `inlaprog` → `bu
 It ends by printing the `bundle/` contents, an `ldd` dependency check, and the R install
 command. Build time is a few minutes on a typical machine.
 
-### Optional: also statically link libcrypto
+### Optional: link libcrypto dynamically instead
 
-By default `libcrypto` stays **dynamic** (OpenSSL static linking is brittle — it drags in
-`ws2_32`/`crypt32`/`bcrypt`). To attempt a fully static crypto and reach the 2-file ideal
-(`inla.exe` + `Rmathfwd.dll` only):
+By default `libcrypto` is linked **statically** (CI-verified), giving the 2-file
+`inla.exe` + `Rmathfwd.dll` bundle; the static archive pulls only Windows system import
+libs (`ws2_32`/`crypt32`/`bcrypt`/`advapi32`/`user32`). If a future OpenSSL update breaks
+static linking, fall back to a dynamic `libcrypto-3-x64.dll` (adds one DLL to the bundle):
 
 ```bash
-STATIC_CRYPTO=1 ./build-configs/windows-native/build-windows.sh
+STATIC_CRYPTO=0 ./build-configs/windows-native/build-windows.sh
 ```
-
-If that link fails, drop the flag — dynamic crypto is the safe, supported default.
 
 ## Installing the engine into R
 
@@ -75,7 +75,7 @@ override explicitly with `inla.setOption(inla.call = "C:/path/to/bundle/inla.exe
 | 3 | Build + install **GMRFLib**; stage the vendored **taucs** static lib |
 | 4 | `gendef`/`dlltool` an import lib for `R.dll`; build the **`Rmathfwd.dll`** forwarder (unprefixed Rmath names → `R.Rf_*`) |
 | 5 | Generate the **cgeneric** headers (`external-packages/update-cgeneric`) |
-| 6 | Build **`inlaprog`** with `-static` (+ `-Wl,-Bdynamic` islands for R/Rmath/crypto) |
+| 6 | Build **`inlaprog`** with `-static` (a `-Wl,-Bdynamic` island keeps R/Rmath dynamic); crypto static by default |
 | 7 | Assemble **`bundle/`** via the transitive DLL closure and print the install step |
 
 ## Verifying against the official engine

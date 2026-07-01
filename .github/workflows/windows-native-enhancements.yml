@@ -138,7 +138,7 @@ jobs:
           bash ./update-cgeneric
           echo "=== generated headers ===" ; ls -la cgeneric-defs.h cgeneric-table.h ; wc -l cgeneric-defs.h cgeneric-table.h
 
-      - name: Build inlaprog — STATICALLY linked (only R.dll/Rmathfwd.dll + crypto stay dynamic)
+      - name: Build inlaprog — STATICALLY linked (only R.dll/Rmathfwd.dll stay dynamic)
         run: |
           set -o pipefail
           PREFIX="$PWD/local"
