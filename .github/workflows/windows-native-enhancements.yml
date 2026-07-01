@@ -7,8 +7,11 @@ name: windows-native-enhancements (static-link inlaprog)
 # R.dll). Everything else with a UCRT64 static archive (.a) is folded into inla.exe.
 #
 # Correctness gate (dispatch job): the from-source engine must STILL match the official
-# INLA engine on 6 models. Static BLAS/OpenMP can change FP reduction order, so the
-# hyperparameter comparison uses the MEDIAN (0.5quant), the project's stable metric.
+# INLA engine on 15 models (6 synthetic + 9 real bundled-dataset cases from the R-INLA
+# literature: Scotland BYM2, Kidney/Leuk survival, Tokyo cyclic RW2, Germany BYM+RW2,
+# Seeds/Epil GLMMs, Drivers seasonal, PRprec SPDE+AR1). Static BLAS/OpenMP can change FP
+# reduction order, so the hyperparameter comparison uses the MEDIAN (0.5quant), the
+# project's stable metric (right-skewed precision posteriors have unstable means).
 
 on:
   workflow_dispatch:
@@ -258,7 +261,7 @@ jobs:
           Rscript -e 'install.packages("rinla", repos=NULL, type="source")'
           Rscript -e 'cat("INLA installed:", as.character(packageVersion("INLA")), "\n")'
 
-      - name: VALIDATION — statically-linked engine vs official engine on 6 models
+      - name: VALIDATION — statically-linked engine vs official engine on 15 models
         if: github.event_name == 'workflow_dispatch'
         run: |
           set -o pipefail
@@ -314,6 +317,76 @@ jobs:
                                 effects=list(idx, list(b0=rep(1, n))), tag="e")
               inla(y ~ 0 + b0 + f(s, model=spde), family="gaussian",
                    data=inla.stack.data(stk),
+                   control.predictor=list(A=inla.stack.A(stk)),
+                   control.inla=list(int.strategy="eb")) },
+            # ---- real-dataset cases (bundled data(); no downloads) --------------------
+            # Broadens coverage: BYM2, survival (exponential+Weibull), cyclic RW2, large
+            # BYM+RW2, binomial/Poisson GLMMs, seasonal, spatial frailty, SPDE+AR1-group.
+            # Hyperpars compared on MEDIAN (right-skewed precisions); weakly-identified
+            # variance components are PC-prior-regularised so both engines hit one mode.
+            scotland_bym2 = function() {
+              data(Scotland); g <- system.file("demodata/scotland.graph", package="INLA")
+              inla(Counts ~ 1 + I(X/10) + f(Region, model="bym2", graph=g, scale.model=TRUE),
+                   family="poisson", E=E, data=Scotland,
+                   control.inla=list(int.strategy="eb")) },
+            kidney_survival = function() {
+              data(Kidney)
+              pc <- list(prec=list(prior="pc.prec", param=c(1, 0.01)))
+              inla(inla.surv(time, event) ~ age + sex + f(ID, model="iid", hyper=pc),
+                   family="exponentialsurv", data=Kidney,
+                   control.inla=list(int.strategy="eb")) },
+            tokyo_cyclicrw2 = function() {
+              data(Tokyo)
+              inla(y ~ -1 + f(time, model="rw2", cyclic=TRUE), family="binomial", Ntrials=n,
+                   data=Tokyo, control.inla=list(int.strategy="eb")) },
+            germany_bym_rw2 = function() {
+              data(Germany); g <- system.file("demodata/germany.graph", package="INLA")
+              inla(Y ~ 1 + f(region, model="bym", graph=g) + f(x, model="rw2"),
+                   family="poisson", E=E, data=Germany,
+                   control.inla=list(int.strategy="eb")) },
+            seeds_glmm = function() {
+              data(Seeds)
+              inla(r ~ x1*x2 + f(plate, model="iid"), family="binomial", Ntrials=n,
+                   data=Seeds, control.inla=list(int.strategy="eb")) },
+            epil_glmm = function() {
+              data(Epil)
+              inla(y ~ Base*Trt + Age + V4 + f(Ind, model="iid") + f(rand, model="iid"),
+                   family="poisson", data=Epil, control.inla=list(int.strategy="eb")) },
+            drivers_seasonal = function() {
+              data(Drivers)
+              pc <- list(prec=list(prior="pc.prec", param=c(1, 0.01)))
+              inla(y ~ belt + f(trend, model="rw2", hyper=pc) +
+                     f(seasonal, model="seasonal", season.length=12, hyper=pc),
+                   family="poisson", data=Drivers, control.inla=list(int.strategy="eb")) },
+            leuk_survival = function() {
+              data(Leuk); g <- system.file("demodata/Leuk.graph", package="INLA")
+              pc <- list(prec=list(prior="pc.prec", param=c(1, 0.01)))
+              inla(inla.surv(time, cens) ~ sex + age + wbc + tpi +
+                     f(district, model="besag", graph=g, scale.model=TRUE, hyper=pc),
+                   family="weibullsurv", data=Leuk,
+                   control.inla=list(int.strategy="eb")) },
+            prprec_spde_ar1 = function() {
+              # Real-coordinate SPDE + AR1-in-time group. Deterministic: mesh built from
+              # fixed station coords with fully-pinned nonconvex hull + inla.mesh.2d args,
+              # over a fixed 5-day window (Jan 1-5) to keep CI runtime bounded.
+              data(PRprec); data(PRborder)
+              days <- sprintf("d%02d%02d", 1, 1:5)
+              coords <- as.matrix(PRprec[, c("Longitude","Latitude")])
+              bnd <- inla.nonconvex.hull(as.matrix(PRborder), convex=-0.03, resolution=50)
+              mesh <- inla.mesh.2d(loc=coords, boundary=bnd,
+                                   max.edge=c(0.7, 1.2), cutoff=0.2, offset=c(0.3, 0.7))
+              spde <- inla.spde2.pcmatern(mesh, prior.range=c(1, 0.5), prior.sigma=c(1, 0.5))
+              nst <- nrow(coords); nt <- length(days)
+              occ <- as.numeric(as.vector(as.matrix(PRprec[, days])) > 0)
+              tidx <- rep(1:nt, each=nst)
+              A <- inla.spde.make.A(mesh, loc=coords[rep(1:nst, nt),],
+                                    group=tidx, n.group=nt)
+              idx <- inla.spde.make.index("s", spde$n.spde, n.group=nt)
+              stk <- inla.stack(data=list(y=occ), A=list(A, 1),
+                                effects=list(idx, list(b0=rep(1, nst*nt))), tag="e")
+              inla(y ~ 0 + b0 + f(s, model=spde, group=s.group,
+                                  control.group=list(model="ar1")),
+                   family="binomial", Ntrials=1, data=inla.stack.data(stk),
                    control.predictor=list(A=inla.stack.A(stk)),
                    control.inla=list(int.strategy="eb")) }
           )
