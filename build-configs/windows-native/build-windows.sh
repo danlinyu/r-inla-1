@@ -63,11 +63,13 @@ SIMDE_INC="-I$PWD/extern/simde"
 # Without this, -lmuparser has no static .a; a dynamic libmuparser.dll would drag
 # libstdc++-6.dll/libgcc_s/libwinpthread back into the bundle. Build our own static lib.
 if [ ! -d "$PWD/extern/muparser" ]; then
-  echo "== vendoring + building static muParser v2.3.4 ..."
-  git clone --depth 1 --branch v2.3.4 https://github.com/beltoforion/muparser.git "$PWD/extern/muparser"
+  echo "== vendoring + building static muParser v2.3.5 ..."
+  git clone --depth 1 --branch v2.3.5 https://github.com/beltoforion/muparser.git "$PWD/extern/muparser"
 fi
+# CMAKE_POLICY_VERSION_MINIMUM=3.5 overrides muParser's old cmake_minimum_required,
+# which CMake 4.x otherwise rejects.
 cmake -S "$PWD/extern/muparser" -B "$PWD/extern/muparser/build" \
-  -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Release \
+  -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
   -DBUILD_SHARED_LIBS=OFF -DENABLE_SAMPLES=OFF -DENABLE_OPENMP=OFF
 cmake --build "$PWD/extern/muparser/build" -j
 MUPARSER_A="$(find "$PWD/extern/muparser/build" -name 'libmuparser*.a' | head -1)"

@@ -79,10 +79,13 @@ jobs:
         run: |
           set -e
           if [ ! -d extern/muparser ]; then
-            git clone --depth 1 --branch v2.3.4 https://github.com/beltoforion/muparser.git extern/muparser
+            # v2.3.5 == the version MSYS2's muparser package ships, so headers match.
+            git clone --depth 1 --branch v2.3.5 https://github.com/beltoforion/muparser.git extern/muparser
           fi
+          # muParser's CMakeLists declares cmake_minimum_required < 3.5, which CMake 4.x
+          # rejects; CMAKE_POLICY_VERSION_MINIMUM=3.5 is the documented override.
           cmake -S extern/muparser -B extern/muparser/build \
-            -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Release \
+            -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
             -DBUILD_SHARED_LIBS=OFF -DENABLE_SAMPLES=OFF -DENABLE_OPENMP=OFF
           cmake --build extern/muparser/build -j
           MUPARSER_A="$(find "$PWD/extern/muparser/build" -name 'libmuparser*.a' | head -1)"
