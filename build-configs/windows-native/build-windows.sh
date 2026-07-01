@@ -140,7 +140,7 @@ fi
 make -C inlaprog \
   PREFIX="$PREFIX" LEXTPREFIX=/ucrt64 \
   CC=gcc CXX=g++ FC=gfortran \
-  FLAGS="-std=gnu99 -O2 -fopenmp -pipe -DINLA_WITH_OPENBLAS -DINLA_WITH_SIMDE -DINLA_WITH_MUPARSER $SIMDE_INC $MUPARSER_INC" \
+  FLAGS="-std=gnu99 -O2 -fopenmp -pipe -DINLA_WITH_OPENBLAS -DINLA_WITH_SIMDE -DINLA_WITH_MUPARSER -DMUPARSER_STATIC $SIMDE_INC $MUPARSER_INC" \
   LDFLAGS="-O2 -fopenmp -pipe -static -static-libgcc -static-libstdc++" \
   RLIB_INC="-DINLA_WITH_LIBR -I$RHOME/include" \
   RLIB_LIB="-L$RBIN -Wl,-Bdynamic -lRmathfwd -lR -Wl,-Bstatic" \
